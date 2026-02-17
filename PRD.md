@@ -51,15 +51,15 @@ Artists in the studio need to export each scene they work on to multiple formats
 Shared elements stay outside the tabs; only role assignments and format checkboxes go inside tabs.
 
 ```
-window "Maya Multi-Export v1.2.2"
+window "Maya Multi-Export v1.2.3"
 +-- columnLayout (main)
 |   +-- frameLayout "Scene Info"              <-- SHARED
 |   +-- frameLayout "Export Root Directory"    <-- SHARED
 |   +-- tabLayout
 |   |   +-- "Camera Track Export"             <-- TAB 1
-|   |   |   +-- Role Assignment
+|   |   |   +-- Node Picker (In the outliner > choose parent nodes)
 |   |   |   |   +-- Camera       (Load Sel)
-|   |   |   |   +-- Geo Root     (Load Sel)
+|   |   |   |   +-- Geo Node     (Load Sel)
 |   |   |   +-- Export Formats
 |   |   |       +-- Maya ASCII (.ma)
 |   |   |       +-- After Effects (.jsx + .obj)
@@ -67,12 +67,12 @@ window "Maya Multi-Export v1.2.2"
 |   |   |       +-- Alembic (.abc)
 |   |   |       +-- Playblast QC (.mov)
 |   |   +-- "Matchmove Export"                <-- TAB 2
-|   |       +-- Role Assignment
-|   |       |   +-- Camera       (Load Sel)
-|   |       |   +-- Static Geo   (Load Sel)
+|   |       +-- Node Picker (In the outliner > choose parent nodes)
+|   |       |   +-- Camera         (Load Sel)
+|   |       |   +-- Static Geo     (Load Sel)
 |   |       |   +-- ---- separator ----
-|   |       |   +-- Rig Root     (Load Sel)   \
-|   |       |   +-- Geo Root     (Load Sel)   / repeatable pair
+|   |       |   +-- Rig Node       (Load Sel)   \
+|   |       |   +-- Anim Geo Node  (Load Sel)   / repeatable pair
 |   |       |   +-- [+] [-] buttons
 |   |       +-- Export Formats
 |   |           +-- Maya ASCII (.ma)
@@ -86,7 +86,7 @@ window "Maya Multi-Export v1.2.2"
 |   +-- progressBar + label                   <-- SHARED
 |   +-- button "E X P O R T"                 <-- SHARED
 |   +-- frameLayout "Log"                    <-- SHARED
-|   +-- text "v1.2.2"                        <-- SHARED
+|   +-- text "v1.2.3"                        <-- SHARED
 ```
 
 #### Shared UI Elements
@@ -98,15 +98,16 @@ window "Maya Multi-Export v1.2.2"
 - **Log Panel**: Scrollable text area showing progress and results
 
 #### Tab 1 — Camera Track Export
-- **Role Assignment**: Two fields (Camera, Geo Root) with "Load Sel" buttons
+- **Node Picker**: Two fields (Camera, Geo Node) with "Load Sel" buttons. Frame label includes subtitle "(In the outliner > choose parent nodes)".
   - User selects object(s) in viewport, clicks the corresponding "Load Sel" button
   - Tool validates the object type (camera shape, transform)
 - **Export Formats**: Checkboxes for Maya ASCII (.ma), After Effects (.jsx + .obj), FBX (.fbx), Alembic (.abc), Playblast QC (.mov)
 
 #### Tab 2 — Matchmove Export
-- **Role Assignment**: Camera and Static Geo are scene-level fields. Below a separator, Rig Root / Geo Root pairs can be added dynamically for multiple characters.
+- **Node Picker**: Camera and Static Geo are scene-level fields. Below a separator, Rig Node / Anim Geo Node pairs can be added dynamically for multiple characters or vertex-animated meshes. Frame label includes subtitle "(In the outliner > choose parent nodes)".
   - **Camera** and **Static Geo**: Single fields with "Load Sel" buttons (same as before)
-  - **Rig/Geo pairs**: Each pair has a Rig Root and Geo Root field with "Load Sel" buttons. The first pair is always shown. A `[+]` button adds additional pairs (labeled "Rig Root 2" / "Geo Root 2", etc.). A `[-]` button appears when 2+ pairs exist to remove the last pair. The UI grows/shrinks vertically as pairs are added/removed.
+  - **Rig/Geo pairs**: Each pair has a Rig Node and Anim Geo Node field with "Load Sel" buttons. The first pair is always shown. A `[+]` button adds additional pairs (labeled "Rig Node 2" / "Anim Geo Node 2", etc.). A `[-]` button appears when 2+ pairs exist to remove the last pair. The UI grows/shrinks vertically as pairs are added/removed.
+  - For vertex-animated meshes (blend shapes, cached deformation), assign as Anim Geo Node with Rig Node left empty
   - Tool validates the object type (camera shape, transform)
 - **Export Formats**: Checkboxes for Maya ASCII (.ma), FBX (.fbx), Alembic (.abc), Playblast QC (.mov)
   - **Include T Pose**: Checkbox (checked by default) with an editable frame number field (default 991). When checked and "Use Timeline Range" is clicked, the start frame is set to the T-pose frame value, ensuring the T-pose frame is included in matchmove exports. Only visible/active on the Matchmove tab.

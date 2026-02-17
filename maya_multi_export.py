@@ -1,5 +1,5 @@
 """
-maya_multi_export.py  v1.2.2
+maya_multi_export.py  v1.2.3
 Maya Multi-Export Tool — Export scenes to .ma, .fbx, .abc with auto versioning.
 
 Drag and drop this file into Maya's viewport to install.
@@ -21,7 +21,7 @@ import maya.mel as mel
 # Constants
 # ---------------------------------------------------------------------------
 TOOL_NAME = "maya_multi_export"
-TOOL_VERSION = "1.2.2"
+TOOL_VERSION = "1.2.3"
 WINDOW_NAME = "multiExportWindow"
 SHELF_BUTTON_LABEL = "MultiExport"
 ICON_FILENAME = "maya_multi_export.png"
@@ -1687,9 +1687,9 @@ class MultiExportUI(object):
         """Build Tab 1: Camera Track Export."""
         tab_col = cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
 
-        # Role Assignment
+        # Node Picker
         cmds.frameLayout(
-            label="Role Assignment",
+            label="Node Picker  (In the outliner > choose parent nodes)",
             collapsable=True,
             marginWidth=8,
             marginHeight=6,
@@ -1709,7 +1709,7 @@ class MultiExportUI(object):
         )
 
         self.ct_geo_root_field = cmds.textFieldButtonGrp(
-            label="Geo Root:",
+            label="Geo Node:",
             buttonLabel="<< Load Sel",
             columnWidth3=(70, 260, 80),
             editable=False,
@@ -1756,9 +1756,9 @@ class MultiExportUI(object):
         """Build Tab 2: Matchmove Export."""
         tab_col = cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
 
-        # Role Assignment
+        # Node Picker
         cmds.frameLayout(
-            label="Role Assignment",
+            label="Node Picker  (In the outliner > choose parent nodes)",
             collapsable=True,
             marginWidth=8,
             marginHeight=6,
@@ -1805,7 +1805,7 @@ class MultiExportUI(object):
         self._add_rig_geo_pair()
 
         cmds.setParent("..")  # out of inner columnLayout
-        cmds.setParent("..")  # out of frameLayout "Role Assignment"
+        cmds.setParent("..")  # out of frameLayout "Node Picker"
 
         # Export Formats
         cmds.frameLayout(
@@ -2011,7 +2011,7 @@ class MultiExportUI(object):
         cmds.setParent("..")  # out of container
 
     def _add_rig_geo_pair(self, *args):
-        """Add a new Rig Root / Geo Root pair to the matchmove tab."""
+        """Add a new Rig Node / Animated Geo Node pair to the matchmove tab."""
         # Remove button row so the new pair is inserted before it
         if self.mm_btn_row:
             cmds.deleteUI(self.mm_btn_row)
@@ -2024,9 +2024,9 @@ class MultiExportUI(object):
         row = cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
 
         rig_field = cmds.textFieldButtonGrp(
-            label="Rig Root{}:".format(suffix),
+            label="Rig Node{}:".format(suffix),
             buttonLabel="<< Load Sel",
-            columnWidth3=(70, 260, 80),
+            columnWidth3=(90, 240, 80),
             editable=False,
         )
         cmds.textFieldButtonGrp(
@@ -2035,9 +2035,9 @@ class MultiExportUI(object):
         )
 
         geo_field = cmds.textFieldButtonGrp(
-            label="Geo Root{}:".format(suffix),
+            label="Anim Geo Node{}:".format(suffix),
             buttonLabel="<< Load Sel",
-            columnWidth3=(70, 260, 80),
+            columnWidth3=(90, 240, 80),
             editable=False,
         )
         cmds.textFieldButtonGrp(
@@ -2063,7 +2063,7 @@ class MultiExportUI(object):
             cmds.window(self.window, edit=True, height=cur_h + 52)
 
     def _remove_rig_geo_pair(self, *args):
-        """Remove the last Rig Root / Geo Root pair."""
+        """Remove the last Rig Node / Animated Geo Node pair."""
         if len(self.mm_rig_geo_pairs) <= 1:
             return
 
@@ -2270,22 +2270,22 @@ class MultiExportUI(object):
 
         if do_ma and not camera and not geo_root:
             errors.append(
-                "MA export enabled but no Camera or Geo Root assigned."
+                "MA export enabled but no Camera or Geo Node assigned."
             )
         if do_jsx and not camera and not geo_root:
             errors.append(
-                "JSX export enabled but no Camera or Geo Root assigned."
+                "JSX export enabled but no Camera or Geo Node assigned."
             )
         if do_fbx and not (camera or geo_root):
             errors.append(
-                "FBX export enabled but no Camera or Geo Root assigned."
+                "FBX export enabled but no Camera or Geo Node assigned."
             )
         if do_abc and not (camera or geo_root):
             errors.append(
-                "Alembic export enabled but no Camera or Geo Root assigned."
+                "Alembic export enabled but no Camera or Geo Node assigned."
             )
 
-        for role_name, value in [("Camera", camera), ("Geo Root", geo_root)]:
+        for role_name, value in [("Camera", camera), ("Geo Node", geo_root)]:
             if value and not cmds.objExists(value):
                 errors.append(
                     "{} '{}' no longer exists in the scene.".format(
@@ -2332,11 +2332,11 @@ class MultiExportUI(object):
             suffix = "" if i == 0 else " {}".format(i + 1)
             if r and not cmds.objExists(r):
                 errors.append(
-                    "Rig Root{} '{}' no longer exists in the scene.".format(
+                    "Rig Node{} '{}' no longer exists in the scene.".format(
                         suffix, r))
             if g and not cmds.objExists(g):
                 errors.append(
-                    "Geo Root{} '{}' no longer exists in the scene.".format(
+                    "Anim Geo Node{} '{}' no longer exists in the scene.".format(
                         suffix, g))
 
         if do_ma and not any(geo_roots + rig_roots + [camera]):
@@ -2345,10 +2345,10 @@ class MultiExportUI(object):
             )
         if do_fbx and not (geo_roots or rig_roots):
             errors.append(
-                "FBX export enabled but no Geo Root or Rig Root assigned."
+                "FBX export enabled but no Anim Geo Node or Rig Node assigned."
             )
         if do_abc and not geo_roots:
-            errors.append("Alembic export enabled but no Geo Root assigned.")
+            errors.append("Alembic export enabled but no Anim Geo Node assigned.")
 
         for role_name, value in [
             ("Camera", camera),
