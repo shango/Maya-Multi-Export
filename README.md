@@ -15,7 +15,7 @@ That's it. Click the shelf button to open the tool.
 
 ## Upgrade
 
-To update to a newer version, drag the new `maya_multi_export.py` into the viewport again. It will overwrite the previous version in your scripts directory and replace the shelf button. **Restart Maya** after upgrading to ensure the new version is fully loaded.
+To update to a newer version, RESTART MAYA, open a fresh scene, then drag the new `maya_multi_export.py` into the viewport again. It will overwrite the previous version in your scripts directory and replace the shelf button. **Restart Maya** after upgrading to ensure the new version is fully loaded.
 
 ## Two-Tab Workflow
 

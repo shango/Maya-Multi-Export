@@ -1,5 +1,5 @@
 """
-maya_multi_export.py  v1.2.0
+maya_multi_export.py  v1.2.2
 Maya Multi-Export Tool — Export scenes to .ma, .fbx, .abc with auto versioning.
 
 Drag and drop this file into Maya's viewport to install.
@@ -21,7 +21,7 @@ import maya.mel as mel
 # Constants
 # ---------------------------------------------------------------------------
 TOOL_NAME = "maya_multi_export"
-TOOL_VERSION = "1.2.0"
+TOOL_VERSION = "1.2.2"
 WINDOW_NAME = "multiExportWindow"
 SHELF_BUTTON_LABEL = "MultiExport"
 ICON_FILENAME = "maya_multi_export.png"
@@ -241,7 +241,6 @@ class Exporter(object):
         """Export selection as Maya ASCII.
 
         Camera should already be renamed to 'cam_main' by the caller.
-        Namespaces are stripped so exported nodes have clean names.
 
         Args:
             geo_roots: list of geo root transforms (or empty list).
@@ -267,63 +266,16 @@ class Exporter(object):
                 self.log("[MA] Nothing to export — no roles assigned.")
                 return False
 
-            # Strip namespaces inside an undo chunk so we can revert
-            cmds.undoInfo(
-                openChunk=True, chunkName="multi_export_ma_ns"
+            cmds.select(sel, replace=True)
+            cmds.file(
+                file_path,
+                exportSelected=True,
+                type="mayaAscii",
+                force=True,
+                preserveReferences=False,
             )
-            try:
-                # Import file references so their namespaces become removable
-                for ref_node in cmds.ls(type="reference") or []:
-                    try:
-                        if cmds.referenceQuery(ref_node, isLoaded=True):
-                            ref_file = cmds.referenceQuery(
-                                ref_node, filename=True
-                            )
-                            cmds.file(ref_file, importReference=True)
-                    except Exception:
-                        pass
-
-                # Remove non-default namespaces
-                default_ns = {"UI", "shared"}
-                all_ns = (
-                    cmds.namespaceInfo(
-                        listOnlyNamespaces=True, recurse=True
-                    ) or []
-                )
-                # Process deepest namespaces first
-                for ns in reversed(sorted(all_ns, key=len)):
-                    if ns not in default_ns:
-                        try:
-                            cmds.namespace(
-                                removeNamespace=ns,
-                                mergeNamespaceWithRoot=True,
-                            )
-                        except Exception:
-                            pass
-
-                # Re-resolve selection (names may have changed)
-                resolved = []
-                for s in sel:
-                    # Strip namespace prefix if present
-                    short = s.rsplit(":", 1)[-1] if ":" in s else s
-                    if cmds.objExists(short):
-                        resolved.append(short)
-                    elif cmds.objExists(s):
-                        resolved.append(s)
-
-                cmds.select(resolved, replace=True)
-                cmds.file(
-                    file_path,
-                    exportSelected=True,
-                    type="mayaAscii",
-                    force=True,
-                    preserveReferences=False,
-                )
-                self.log("[MA] Exported: " + file_path)
-                return True
-            finally:
-                cmds.undoInfo(closeChunk=True)
-                cmds.undo()
+            self.log("[MA] Exported: " + file_path)
+            return True
         except Exception as e:
             self.log("[MA] FAILED: " + str(e))
             return False
@@ -370,127 +322,45 @@ class Exporter(object):
                 self.log("[FBX] Nothing to export — no roles assigned.")
                 return False
 
-            # Open undo chunk so we can revert baking
-            cmds.undoInfo(openChunk=True, chunkName="multi_export_fbx_bake")
-            try:
-                # Collect bake targets: camera, joints, and constrained transforms
-                bake_targets = []
+            # Set FBX export options
+            mel.eval("FBXResetExport")
+            # Include Options
+            mel.eval("FBXExportInputConnections -v false")
+            mel.eval("FBXExportEmbeddedTextures -v false")
+            # Animation
+            mel.eval("FBXExportQuaternion -v resample")
+            # Bake Animation — FBX plugin bakes internally without
+            # modifying the source scene
+            mel.eval("FBXExportBakeComplexAnimation -v true")
+            mel.eval(
+                "FBXExportBakeComplexStart -v {}".format(int(start_frame))
+            )
+            mel.eval(
+                "FBXExportBakeComplexEnd -v {}".format(int(end_frame))
+            )
+            mel.eval("FBXExportBakeComplexStep -v 1")
+            mel.eval("FBXExportBakeResampleAnimation -v false")
+            # Deformed Models
+            mel.eval("FBXExportSkins -v true")
+            mel.eval("FBXExportShapes -v true")
+            # General
+            mel.eval("FBXExportSmoothingGroups -v true")
+            mel.eval("FBXExportSmoothMesh -v false")
+            mel.eval("FBXExportConstraints -v false")
+            mel.eval("FBXExportCameras -v true")
+            mel.eval("FBXExportLights -v false")
+            mel.eval("FBXExportSkeletonDefinitions -v true")
+            mel.eval("FBXExportInAscii -v false")
+            mel.eval('FBXExportFileVersion -v "FBX202000"')
+            mel.eval("FBXExportUseSceneName -v false")
 
-                # Camera always gets baked (has animation) — even if under geo_root
-                if camera:
-                    bake_targets.append(cmds.ls(camera, long=True)[0])
+            # Select and export
+            cmds.select(sel, replace=True)
+            mel_path = file_path.replace("\\", "/")
+            mel.eval('FBXExport -f "{}" -s'.format(mel_path))
 
-                # Rig roots: bake ALL joints and transforms.
-                # Rigs use constraints, expressions, IK, set-driven keys,
-                # motion paths, etc. — any transform could be driven by
-                # any mechanism, so bake everything to be safe.
-                for rig_root in rig_roots:
-                    if not rig_root:
-                        continue
-                    joints = (
-                        cmds.listRelatives(
-                            rig_root,
-                            allDescendents=True,
-                            type="joint",
-                            fullPath=True,
-                        )
-                        or []
-                    )
-                    bake_targets.extend(joints)
-                    all_transforms = (
-                        cmds.listRelatives(
-                            rig_root,
-                            allDescendents=True,
-                            type="transform",
-                            fullPath=True,
-                        )
-                        or []
-                    )
-                    all_transforms.insert(
-                        0, cmds.ls(rig_root, long=True)[0]
-                    )
-                    bake_targets.extend(all_transforms)
-
-                # Geo/proxy roots: only bake transforms that have
-                # animation curves (e.g. object-tracked geo).
-                for root in geo_roots + [proxy_geo]:
-                    if not root:
-                        continue
-                    descendants = (
-                        cmds.listRelatives(
-                            root,
-                            allDescendents=True,
-                            type="transform",
-                            fullPath=True,
-                        )
-                        or []
-                    )
-                    descendants.insert(0, cmds.ls(root, long=True)[0])
-                    for tfm in descendants:
-                        anim_curves = cmds.listConnections(
-                            tfm, type="animCurve"
-                        )
-                        if anim_curves:
-                            bake_targets.append(tfm)
-
-                # Bake animation
-                if bake_targets:
-                    cmds.bakeResults(
-                        bake_targets,
-                        time=(start_frame, end_frame),
-                        simulation=True,
-                        sampleBy=1,
-                        oversamplingRate=1,
-                        disableImplicitControl=True,
-                        preserveOutsideKeys=False,
-                        sparseAnimCurveBake=False,
-                        removeBakedAttributeFromLayer=False,
-                        bakeOnOverrideLayer=False,
-                        minimizeRotation=True,
-                    )
-
-                # Set FBX export options
-                mel.eval("FBXResetExport")
-                # Include Options
-                mel.eval("FBXExportInputConnections -v false")
-                mel.eval("FBXExportEmbeddedTextures -v false")
-                # Animation
-                mel.eval("FBXExportQuaternion -v resample")
-                # Bake Animation
-                mel.eval("FBXExportBakeComplexAnimation -v true")
-                mel.eval(
-                    "FBXExportBakeComplexStart -v {}".format(int(start_frame))
-                )
-                mel.eval(
-                    "FBXExportBakeComplexEnd -v {}".format(int(end_frame))
-                )
-                mel.eval("FBXExportBakeComplexStep -v 1")
-                mel.eval("FBXExportBakeResampleAnimation -v false")
-                # Deformed Models
-                mel.eval("FBXExportSkins -v true")
-                mel.eval("FBXExportShapes -v true")
-                # General
-                mel.eval("FBXExportSmoothingGroups -v true")
-                mel.eval("FBXExportSmoothMesh -v false")
-                mel.eval("FBXExportConstraints -v false")
-                mel.eval("FBXExportCameras -v true")
-                mel.eval("FBXExportLights -v false")
-                mel.eval("FBXExportSkeletonDefinitions -v true")
-                mel.eval("FBXExportInAscii -v false")
-                mel.eval('FBXExportFileVersion -v "FBX202000"')
-                mel.eval("FBXExportUseSceneName -v false")
-
-                # Select and export
-                cmds.select(sel, replace=True)
-                mel_path = file_path.replace("\\", "/")
-                mel.eval('FBXExport -f "{}" -s'.format(mel_path))
-
-                self.log("[FBX] Exported: " + file_path)
-                return True
-            finally:
-                # Revert bake — restore original scene state
-                cmds.undoInfo(closeChunk=True)
-                cmds.undo()
+            self.log("[FBX] Exported: " + file_path)
+            return True
         except Exception as e:
             self.log("[FBX] FAILED: " + str(e))
             return False
@@ -526,85 +396,46 @@ class Exporter(object):
                 self.log("[ABC] Nothing to export — no roles assigned.")
                 return False
 
-            # Strip namespaces inside an undo chunk for clean export
-            cmds.undoInfo(
-                openChunk=True, chunkName="multi_export_abc_ns"
+            # Build root flags
+            cam_under_geo = any(
+                self._is_descendant_of(camera, gr)
+                for gr in geo_roots if gr
             )
-            try:
-                # Import file references so their namespaces become removable
-                for ref_node in cmds.ls(type="reference") or []:
-                    try:
-                        if cmds.referenceQuery(ref_node, isLoaded=True):
-                            ref_file = cmds.referenceQuery(
-                                ref_node, filename=True
-                            )
-                            cmds.file(ref_file, importReference=True)
-                    except Exception:
-                        pass
+            root_flags = ""
+            root_nodes = [camera] + geo_roots + [proxy_geo]
+            for node in root_nodes:
+                if not node:
+                    continue
+                if node == camera and cam_under_geo:
+                    continue
+                long_names = cmds.ls(node, long=True)
+                if not long_names:
+                    self.log(
+                        "[ABC] '{}' not found in scene.".format(node)
+                    )
+                    return False
+                root_flags += "-root {} ".format(long_names[0])
 
-                default_ns = {"UI", "shared"}
-                all_ns = (
-                    cmds.namespaceInfo(
-                        listOnlyNamespaces=True, recurse=True
-                    ) or []
-                )
-                for ns in reversed(sorted(all_ns, key=len)):
-                    if ns not in default_ns:
-                        try:
-                            cmds.namespace(
-                                removeNamespace=ns,
-                                mergeNamespaceWithRoot=True,
-                            )
-                        except Exception:
-                            pass
+            abc_path = file_path.replace("\\", "/")
 
-                # Build root flags (re-resolve after namespace strip)
-                cam_under_geo = any(
-                    self._is_descendant_of(camera, gr)
-                    for gr in geo_roots if gr
-                )
-                root_flags = ""
-                root_nodes = [camera] + geo_roots + [proxy_geo]
-                for node in root_nodes:
-                    if not node:
-                        continue
-                    if node == camera and cam_under_geo:
-                        continue
-                    # Resolve short name after namespace strip
-                    short = node.rsplit(":", 1)[-1] if ":" in node else node
-                    resolved = short if cmds.objExists(short) else node
-                    long_names = cmds.ls(resolved, long=True)
-                    if not long_names:
-                        self.log(
-                            "[ABC] '{}' not found in scene.".format(node)
-                        )
-                        return False
-                    root_flags += "-root {} ".format(long_names[0])
+            job_string = (
+                "-frameRange {start} {end} "
+                "-uvWrite "
+                "-worldSpace "
+                "-wholeFrameGeo "
+                "-dataFormat ogawa "
+                "{roots}"
+                "-file '{file}'"
+            ).format(
+                start=int(start_frame),
+                end=int(end_frame),
+                roots=root_flags,
+                file=abc_path,
+            )
 
-                abc_path = file_path.replace("\\", "/")
-
-                job_string = (
-                    "-frameRange {start} {end} "
-                    "-uvWrite "
-                    "-worldSpace "
-                    "-wholeFrameGeo "
-                    "-stripNamespaces "
-                    "-dataFormat ogawa "
-                    "{roots}"
-                    "-file '{file}'"
-                ).format(
-                    start=int(start_frame),
-                    end=int(end_frame),
-                    roots=root_flags,
-                    file=abc_path,
-                )
-
-                cmds.AbcExport(j=job_string)
-                self.log("[ABC] Exported: " + file_path)
-                return True
-            finally:
-                cmds.undoInfo(closeChunk=True)
-                cmds.undo()
+            cmds.AbcExport(j=job_string)
+            self.log("[ABC] Exported: " + file_path)
+            return True
         except Exception as e:
             self.log("[ABC] FAILED: " + str(e))
             return False
@@ -739,6 +570,10 @@ class Exporter(object):
                 )
                 cmds.lookThru(model_panel, camera)
 
+            # Clear selection so no highlight appears in the playblast
+            original_sel = cmds.ls(selection=True)
+            cmds.select(clear=True)
+
             # Set viewport display mode:
             #   Matchmove -> wireframe on shaded, AA on, polygons only
             #   Camera track -> wireframe
@@ -763,17 +598,50 @@ class Exporter(object):
                         model_panel, edit=True, wireframeOnShaded=True
                     )
 
-            # Enable anti-aliasing for matchmove playblasts
-            if hide_rig_elements:
+            # Enable anti-aliasing, multisampling, and smooth wireframe
+            original_msaa_count = None
+            original_smooth_wire = None
+            try:
+                original_aa = cmds.getAttr(
+                    "hardwareRenderingGlobals.multiSampleEnable"
+                )
+                cmds.setAttr(
+                    "hardwareRenderingGlobals.multiSampleEnable", True
+                )
+            except Exception:
+                pass
+            try:
+                original_msaa_count = cmds.getAttr(
+                    "hardwareRenderingGlobals.multiSampleCount"
+                )
+                cmds.setAttr(
+                    "hardwareRenderingGlobals.multiSampleCount", 16
+                )
+            except Exception:
+                pass
+            if model_panel:
                 try:
-                    original_aa = cmds.getAttr(
-                        "hardwareRenderingGlobals.multiSampleEnable"
+                    original_smooth_wire = cmds.modelEditor(
+                        model_panel, query=True, smoothWireframe=True
                     )
-                    cmds.setAttr(
-                        "hardwareRenderingGlobals.multiSampleEnable", True
+                    cmds.modelEditor(
+                        model_panel, edit=True, smoothWireframe=True
                     )
                 except Exception:
                     pass
+
+            # Camera track: ensure all geometry is visible
+            original_editor_vis = {}
+            if not hide_rig_elements and model_panel:
+                for flag in ("polymeshes", "nurbsSurfaces",
+                             "subdivSurfaces"):
+                    try:
+                        original_editor_vis[flag] = cmds.modelEditor(
+                            model_panel, query=True, **{flag: True})
+                        cmds.modelEditor(
+                            model_panel, edit=True, **{flag: True})
+                    except Exception:
+                        pass
 
             # Matchmove: hide all non-polygon object types and rig elements
             # so only skin geometry and static geo are visible.
@@ -856,12 +724,35 @@ class Exporter(object):
                             model_panel, edit=True, **{flag: val})
                     except Exception:
                         pass
+                # Restore camera track editor visibility
+                for flag, val in original_editor_vis.items():
+                    try:
+                        cmds.modelEditor(
+                            model_panel, edit=True, **{flag: val})
+                    except Exception:
+                        pass
                 # Restore anti-aliasing
                 if original_aa is not None:
                     try:
                         cmds.setAttr(
                             "hardwareRenderingGlobals.multiSampleEnable",
                             original_aa)
+                    except Exception:
+                        pass
+                # Restore multisampling count
+                if original_msaa_count is not None:
+                    try:
+                        cmds.setAttr(
+                            "hardwareRenderingGlobals.multiSampleCount",
+                            original_msaa_count)
+                    except Exception:
+                        pass
+                # Restore smooth wireframe
+                if original_smooth_wire is not None and model_panel:
+                    try:
+                        cmds.modelEditor(
+                            model_panel, edit=True,
+                            smoothWireframe=original_smooth_wire)
                     except Exception:
                         pass
                 # Restore wireframe on shaded
@@ -881,8 +772,16 @@ class Exporter(object):
                 # Restore original camera in panel
                 if original_cam and model_panel:
                     cmds.lookThru(model_panel, original_cam)
+                # Restore original selection
+                if original_sel:
+                    try:
+                        cmds.select(original_sel, replace=True)
+                    except Exception:
+                        pass
         except Exception as e:
+            import traceback
             self.log("[Playblast] FAILED: " + str(e))
+            self.log(traceback.format_exc())
             return False
 
     # --- JSX Helper Methods ---
@@ -1199,13 +1098,24 @@ class Exporter(object):
         The footage is imported as a sequence and added to the comp.
         If the file doesn't exist on the AE machine, a placeholder is
         created instead.  The layer is moved to the bottom of the stack.
+
+        image_path may be relative (to the JSX file) or absolute (if on
+        a different drive).  Relative paths are resolved against the
+        running script's parent folder via ``$.fileName``.
         """
         jsx = []
         # Normalise path separators for JSX (forward slashes)
         jsx_path = image_path.replace("\\", "/")
 
         jsx.append("// Source footage")
-        jsx.append("var footageFile = File('{}');".format(jsx_path))
+        # Resolve relative paths against the JSX file's directory
+        if not os.path.isabs(image_path):
+            jsx.append("var _scriptDir = (new File($.fileName)).parent;")
+            jsx.append(
+                "var footageFile = new File("
+                "_scriptDir.fsName + '/' + '{}');".format(jsx_path))
+        else:
+            jsx.append("var footageFile = File('{}');".format(jsx_path))
         jsx.append("var srcFootage;")
         jsx.append("if (!footageFile.exists) {")
         jsx.append("    srcFootage = app.project.importPlaceholder("
@@ -1585,10 +1495,19 @@ class Exporter(object):
             if camera:
                 img_path = self._get_image_plane_path(camera)
                 if img_path:
+                    # Make path relative to JSX file location when possible
+                    try:
+                        jsx_dir = os.path.dirname(os.path.abspath(jsx_path))
+                        rel_path = os.path.relpath(img_path, jsx_dir)
+                        footage_path = rel_path
+                    except ValueError:
+                        # Different drives on Windows — keep absolute
+                        footage_path = img_path
                     self.log("[JSX] Including source footage: {}".format(
-                        img_path))
+                        footage_path))
                     jsx_lines.extend(self._jsx_footage(
-                        img_path, fps, duration, comp_width, comp_height))
+                        footage_path, fps, duration,
+                        comp_width, comp_height))
 
             # Footer
             jsx_lines.extend(self._jsx_footer())
@@ -1908,6 +1827,24 @@ class MultiExportUI(object):
         self.mm_mov_checkbox = cmds.checkBox(
             label="  Playblast QC (.mov)", value=True
         )
+        cmds.separator(style="in", height=8)
+        cmds.rowLayout(
+            numberOfColumns=3,
+            columnWidth3=(120, 70, 1),
+            columnAlign3=("left", "left", "left"),
+        )
+        self.tpose_checkbox = cmds.checkBox(
+            label="Include T Pose",
+            value=True,
+            changeCommand=partial(self._on_tpose_toggled),
+        )
+        self.tpose_frame_field = cmds.intField(
+            value=991,
+            width=55,
+            changeCommand=partial(self._on_tpose_frame_changed),
+        )
+        cmds.text(label="")
+        cmds.setParent("..")
         cmds.setParent("..")
         cmds.setParent("..")
 
@@ -1937,23 +1874,6 @@ class MultiExportUI(object):
             label="Use Timeline Range",
             command=partial(self._set_timeline_range),
         )
-        cmds.rowLayout(
-            numberOfColumns=3,
-            columnWidth3=(120, 70, 1),
-            columnAlign3=("left", "left", "left"),
-        )
-        self.tpose_checkbox = cmds.checkBox(
-            label="Include T Pose",
-            value=True,
-            changeCommand=partial(self._on_tpose_toggled),
-        )
-        self.tpose_frame_field = cmds.intField(
-            value=991,
-            width=55,
-            changeCommand=partial(self._on_tpose_frame_changed),
-        )
-        cmds.text(label="")
-        cmds.setParent("..")
         cmds.setParent("..")
         cmds.setParent("..")
 
@@ -2160,12 +2080,13 @@ class MultiExportUI(object):
     def _set_timeline_range(self, *args):
         start = cmds.playbackOptions(query=True, minTime=True)
         end = cmds.playbackOptions(query=True, maxTime=True)
-        # If Include T Pose is checked, override start with the T-pose frame
-        if cmds.checkBox(self.tpose_checkbox, query=True, value=True):
-            tpose_frame = cmds.intField(
-                self.tpose_frame_field, query=True, value=True
-            )
-            start = min(tpose_frame, start)
+        # If Include T Pose is checked (matchmove tab only), override start
+        if self._get_active_tab() == TAB_MATCHMOVE:
+            if cmds.checkBox(self.tpose_checkbox, query=True, value=True):
+                tpose_frame = cmds.intField(
+                    self.tpose_frame_field, query=True, value=True
+                )
+                start = min(tpose_frame, start)
         cmds.intField(self.start_frame_field, edit=True, value=int(start))
         cmds.intField(self.end_frame_field, edit=True, value=int(end))
 

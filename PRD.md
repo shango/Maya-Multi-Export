@@ -51,7 +51,7 @@ Artists in the studio need to export each scene they work on to multiple formats
 Shared elements stay outside the tabs; only role assignments and format checkboxes go inside tabs.
 
 ```
-window "Maya Multi-Export v1.1.0"
+window "Maya Multi-Export v1.2.2"
 +-- columnLayout (main)
 |   +-- frameLayout "Scene Info"              <-- SHARED
 |   +-- frameLayout "Export Root Directory"    <-- SHARED
@@ -79,21 +79,20 @@ window "Maya Multi-Export v1.1.0"
 |   |           +-- FBX (.fbx)
 |   |           +-- Alembic (.abc)
 |   |           +-- Playblast QC (.mov)
+|   |           +-- checkBox "Include T Pose" + intField (991)
 |   +-- frameLayout "Frame Range"             <-- SHARED
 |   |   +-- Start / End fields
 |   |   +-- "Use Timeline Range" button
-|   |   +-- checkBox "Include T Pose" + intField (991)
 |   +-- progressBar + label                   <-- SHARED
 |   +-- button "E X P O R T"                 <-- SHARED
 |   +-- frameLayout "Log"                    <-- SHARED
-|   +-- text "v1.1.0"                        <-- SHARED
+|   +-- text "v1.2.2"                        <-- SHARED
 ```
 
 #### Shared UI Elements
 - **Scene Info**: Displays current scene name, detected version, and status
 - **Export Root**: Directory picker for the base export location
 - **Frame Range**: Start/end frame fields + "Use Timeline Range" button
-  - **Include T Pose**: Checkbox (checked by default) with an editable frame number field (default 991). When checked, the start frame is set to the T-pose frame value when "Use Timeline Range" is clicked, ensuring the T-pose frame is included in all exports. The frame number can be customized.
 - **Progress Bar**: Visual progress indicator with percentage label, advances per export format
 - **Export Button**: Triggers the export pipeline for the active tab
 - **Log Panel**: Scrollable text area showing progress and results
@@ -110,6 +109,7 @@ window "Maya Multi-Export v1.1.0"
   - **Rig/Geo pairs**: Each pair has a Rig Root and Geo Root field with "Load Sel" buttons. The first pair is always shown. A `[+]` button adds additional pairs (labeled "Rig Root 2" / "Geo Root 2", etc.). A `[-]` button appears when 2+ pairs exist to remove the last pair. The UI grows/shrinks vertically as pairs are added/removed.
   - Tool validates the object type (camera shape, transform)
 - **Export Formats**: Checkboxes for Maya ASCII (.ma), FBX (.fbx), Alembic (.abc), Playblast QC (.mov)
+  - **Include T Pose**: Checkbox (checked by default) with an editable frame number field (default 991). When checked and "Use Timeline Range" is clicked, the start frame is set to the T-pose frame value, ensuring the T-pose frame is included in matchmove exports. Only visible/active on the Matchmove tab.
 
 ### Versioning
 - Parse version from Maya filename using `_v##` pattern (e.g., `shot_v01.ma`)
@@ -148,12 +148,6 @@ Version-aware folder naming with an After Effects subfolder for Camera Track out
 - Camera is temporarily renamed to `cam_main` before any exports begin, then restored after all exports complete
 - Rename happens once at the orchestration level (not per-format)
 
-#### Namespace Stripping (MA and ABC exports)
-- File references are imported (converted to local nodes) before stripping, so reference-locked namespaces become removable
-- All non-default namespaces are then removed via `cmds.namespace(removeNamespace=..., mergeNamespaceWithRoot=True)`
-- Performed inside an undo chunk and reverted after export (scene stays clean)
-- ABC export additionally uses the `-stripNamespaces` flag in the AbcExport job string as a belt-and-suspenders approach
-
 #### Maya ASCII (.ma) — Both tabs
 - **Tab 1**: Exports Camera + Geo Root
 - **Tab 2**: Exports Camera + Geo Root + Rig Root + Static Geo
@@ -163,15 +157,11 @@ Version-aware folder naming with an After Effects subfolder for Camera Track out
 #### FBX (.fbx) — Both tabs
 - **Tab 1**: Exports Camera + Geo Root
 - **Tab 2**: Exports Camera + Geo Root + Rig Root + Static Geo
-- **Smart bake targeting**:
-  - Camera: always baked
-  - Rig root: all joints and transforms baked (rigs use constraints, expressions, IK, set-driven keys, etc.)
-  - Geo/Static Geo roots: only transforms with `animCurve` connections are baked (skips static objects)
-- Bake is performed inside an undo-chunk and reverted after export (scene stays clean)
+- **Animation baking**: Handled by the FBX plugin's built-in `FBXExportBakeComplexAnimation` setting, which bakes internally during export without modifying the source scene. No pre-bake or undo chunk needed.
 - FBX export settings overridden via MEL commands:
-  - Bake complex animation: on
+  - Bake complex animation: on (plugin-internal baking)
   - Quaternion: resample
-  - Constraints: off (baked already)
+  - Constraints: off
   - Cameras: on
   - Lights: off
   - Input connections: off
@@ -186,7 +176,7 @@ Version-aware folder naming with an After Effects subfolder for Camera Track out
 - **Tab 1**: Exports Camera + Geo Root
 - **Tab 2**: Exports Camera + Geo Root + Static Geo
 - Animation is baked implicitly by Alembic's frame-range sampling (no explicit `bakeResults`)
-- Flags: `-uvWrite`, `-worldSpace`, `-wholeFrameGeo`, `-stripNamespaces`, `-dataFormat ogawa`
+- Flags: `-uvWrite`, `-worldSpace`, `-wholeFrameGeo`, `-dataFormat ogawa`
 - Uses `cmds.AbcExport(j=job_string)` with `-root` flag per assigned role
 
 #### After Effects (.jsx + .obj) — Tab 1 only
@@ -225,10 +215,13 @@ Version-aware folder naming with an After Effects subfolder for Camera Track out
 - Uses `cmds.playblast()` with `format="qt"`, `compression="H.264"`, `widthHeight=[1920, 1080]`
 - Finds a visible model panel for rendering (does not rely on `withFocus` since clicking Export shifts focus)
 - Switches the panel to the assigned camera via `cmds.lookThru()`, restores original camera afterward
-- **Display mode**: Camera track playblasts (Tab 1) use **wireframe** display. Matchmove playblasts (Tab 2) use **wireframe on shaded** (smoothShaded + wireframeOnShaded) with **anti-aliasing enabled** (`hardwareRenderingGlobals.multiSampleEnable`) and **polygons only** visible. All display settings are restored afterward.
+- **Display mode**: Camera track playblasts (Tab 1) use **wireframe** display. Matchmove playblasts (Tab 2) use **wireframe on shaded** (smoothShaded + wireframeOnShaded) with **polygons only** visible. All display settings are restored afterward.
+- **Anti-aliasing**: Both tabs enable multisampling AA (`hardwareRenderingGlobals.multiSampleEnable`, `multiSampleCount=16`) and smooth wireframe during the playblast, restored afterward
 - **Backface culling**: Enables full backface culling on all meshes during the playblast for cleaner QC review, restores original per-mesh culling values afterward
+- **Selection cleared**: Viewport selection is cleared before the playblast so no highlight appears, restored afterward
 - **Polygons only (Tab 2 only)**: For matchmove playblasts, all non-polygon object types are hidden (NURBS surfaces, subdivs, planes, lights, cameras, fluids, hair, nCloths, nParticles, strokes, etc.) along with rig elements (joints, nurbs curves, locators, handles, IK handles, deformers, dynamics, manipulators). Only polymeshes remain visible. All visibility settings are restored after the playblast.
-- **Requires QuickTime**: If the "qt" format is not available, shows a popup dialog instructing the user to install Apple QuickTime Essentials and restart Maya
+- **All geo visible (Tab 1 only)**: Camera track playblasts ensure polymeshes, NURBS surfaces, and subdiv surfaces are visible
+- **Platform-aware format**: Prefers `avfoundation` (macOS native) over `qt` (Windows QuickTime). If neither is available, shows a platform-appropriate popup dialog
 
 ### Progress Bar
 - Visual progress bar with percentage label shown during export
@@ -242,7 +235,7 @@ Version-aware folder naming with an After Effects subfolder for Camera Track out
 - Plugin auto-loading for FBX (`fbxmaya`), Alembic (`AbcExport`), and OBJ (`objExport`)
 - QuickTime availability check for playblast (popup if missing)
 - Selection state saved and restored after all exports
-- Undo-chunk safety with try/finally for FBX bake and namespace strip operations
+- FBX baking delegated to the FBX plugin's internal baking (no scene modification or undo chunks)
 
 ## Non-Functional Requirements
 
