@@ -51,15 +51,15 @@ Artists in the studio need to export each scene they work on to multiple formats
 Shared elements stay outside the tabs; only role assignments and format checkboxes go inside tabs.
 
 ```
-window "Maya Multi-Export v1.2.3"
+window "Maya Multi-Export v1.3.0"
 +-- columnLayout (main)
-|   +-- frameLayout "Scene Info"              <-- SHARED
+|   +-- frameLayout "Scene Info"              <-- SHARED (auto-refreshes on save/open)
 |   +-- frameLayout "Export Root Directory"    <-- SHARED
 |   +-- tabLayout
 |   |   +-- "Camera Track Export"             <-- TAB 1
 |   |   |   +-- Node Picker (In the outliner > choose parent nodes)
 |   |   |   |   +-- Camera       (Load Sel)
-|   |   |   |   +-- Geo Node     (Load Sel)
+|   |   |   |   +-- Geo Group    (Load Sel)
 |   |   |   +-- Export Formats
 |   |   |       +-- Maya ASCII (.ma)
 |   |   |       +-- After Effects (.jsx + .obj)
@@ -68,11 +68,11 @@ window "Maya Multi-Export v1.2.3"
 |   |   |       +-- Playblast QC (.mov)
 |   |   +-- "Matchmove Export"                <-- TAB 2
 |   |       +-- Node Picker (In the outliner > choose parent nodes)
-|   |       |   +-- Camera         (Load Sel)
-|   |       |   +-- Static Geo     (Load Sel)
+|   |       |   +-- Camera           (Load Sel)
+|   |       |   +-- Static Geo       (Load Sel)
 |   |       |   +-- ---- separator ----
-|   |       |   +-- Rig Node       (Load Sel)   \
-|   |       |   +-- Anim Geo Node  (Load Sel)   / repeatable pair
+|   |       |   +-- Ctrl Rig Group   (Load Sel)   \
+|   |       |   +-- Anim Geo Group   (Load Sel)   / repeatable pair
 |   |       |   +-- [+] [-] buttons
 |   |       +-- Export Formats
 |   |           +-- Maya ASCII (.ma)
@@ -85,53 +85,58 @@ window "Maya Multi-Export v1.2.3"
 |   |   +-- "Use Timeline Range" button
 |   +-- progressBar + label                   <-- SHARED
 |   +-- button "E X P O R T"                 <-- SHARED
-|   +-- frameLayout "Log"                    <-- SHARED
-|   +-- text "v1.2.3"                        <-- SHARED
+|   +-- frameLayout "Status"                 <-- SHARED
+|   +-- text "v1.3.0"                        <-- SHARED
 ```
 
 #### Shared UI Elements
-- **Scene Info**: Displays current scene name, detected version, and status
+- **Scene Info**: Displays current scene name, detected version, and status. Auto-refreshes via `cmds.scriptJob` on `SceneOpened`, `SceneSaved`, and `NewSceneOpened` events (jobs parented to window for automatic cleanup)
 - **Export Root**: Directory picker for the base export location
 - **Frame Range**: Start/end frame fields + "Use Timeline Range" button
 - **Progress Bar**: Visual progress indicator with percentage label, advances per export format
 - **Export Button**: Triggers the export pipeline for the active tab
-- **Log Panel**: Scrollable text area showing progress and results
+- **Status Panel**: Scrollable text area showing export progress and results. Shows "Export to: {path}" at start, then one-line status per format ("MA ... done" or "MA ... FAILED (see Script Editor)"). Validation errors are also logged here before appearing in the popup dialog
 
 #### Tab 1 — Camera Track Export
-- **Node Picker**: Two fields (Camera, Geo Node) with "Load Sel" buttons. Frame label includes subtitle "(In the outliner > choose parent nodes)".
+- **Node Picker**: Two fields (Camera, Geo Group) with "Load Sel" buttons. Frame label includes subtitle "(In the outliner > choose parent nodes)".
   - User selects object(s) in viewport, clicks the corresponding "Load Sel" button
   - Tool validates the object type (camera shape, transform)
 - **Export Formats**: Checkboxes for Maya ASCII (.ma), After Effects (.jsx + .obj), FBX (.fbx), Alembic (.abc), Playblast QC (.mov)
 
 #### Tab 2 — Matchmove Export
-- **Node Picker**: Camera and Static Geo are scene-level fields. Below a separator, Rig Node / Anim Geo Node pairs can be added dynamically for multiple characters or vertex-animated meshes. Frame label includes subtitle "(In the outliner > choose parent nodes)".
+- **Node Picker**: Camera and Static Geo are scene-level fields. Below a separator, Ctrl Rig Group / Anim Geo Group pairs can be added dynamically for multiple characters or vertex-animated meshes. Frame label includes subtitle "(In the outliner > choose parent nodes)".
   - **Camera** and **Static Geo**: Single fields with "Load Sel" buttons (same as before)
-  - **Rig/Geo pairs**: Each pair has a Rig Node and Anim Geo Node field with "Load Sel" buttons. The first pair is always shown. A `[+]` button adds additional pairs (labeled "Rig Node 2" / "Anim Geo Node 2", etc.). A `[-]` button appears when 2+ pairs exist to remove the last pair. The UI grows/shrinks vertically as pairs are added/removed.
-  - For vertex-animated meshes (blend shapes, cached deformation), assign as Anim Geo Node with Rig Node left empty
+  - **Rig/Geo pairs**: Each pair has a Ctrl Rig Group and Anim Geo Group field with "Load Sel" buttons. The first pair is always shown. A `[+]` button adds additional pairs (labeled "Ctrl Rig Group 2" / "Anim Geo Group 2", etc.). A `[-]` button appears when 2+ pairs exist to remove the last pair. The UI grows/shrinks vertically as pairs are added/removed.
+  - For vertex-animated meshes (blend shapes, cached deformation), assign as Anim Geo Group with Ctrl Rig Group left empty
   - Tool validates the object type (camera shape, transform)
 - **Export Formats**: Checkboxes for Maya ASCII (.ma), FBX (.fbx), Alembic (.abc), Playblast QC (.mov)
-  - **Include T Pose**: Checkbox (checked by default) with an editable frame number field (default 991). When checked and "Use Timeline Range" is clicked, the start frame is set to the T-pose frame value, ensuring the T-pose frame is included in matchmove exports. Only visible/active on the Matchmove tab.
+  - **Include T Pose**: Checkbox (checked by default) with an editable frame number field (default 991). When checked and "Use Timeline Range" is clicked, the start frame is set to the T-pose frame value, ensuring the T-pose frame is included in FBX and ABC exports. The QC playblast always uses the original timeline range (no T-pose). Only visible/active on the Matchmove tab.
 
-### Versioning
+### Versioning & Scene Name Parsing
 - Parse version from Maya filename using `_v##` pattern (e.g., `shot_v01.ma`)
-- Support 2-3 digit versions (`_v01`, `_v100`)
+- Support 2-3 digit versions in the filename (`_v01`, `_v100`)
+- **Version normalization**: Versions are always output as 2 digits (`v002` → `v02`, `v01` → `v01`)
 - If multiple `_v##` patterns exist, use the last one
 - If no version found: warn user, default to `v01`
+- **Task name stripping**: The last underscore segment before the version is treated as the task name and removed from the export base name. For example:
+  - `shotNum_plateNum_taskName_v002.ma` → base `shotNum_plateNum`, version `v02`
+  - `shot_task_v01.ma` → base `shot`, version `v01`
+  - `shot_v01.ma` → base `shot`, version `v01` (no task segment to strip)
 
 ### Folder Structure
 
 Version-aware folder naming with an After Effects subfolder for Camera Track output:
 ```
 <export_root>/
-  <scene_base>_track_<version>/
-    <scene>_<version>.ma
-    <scene>_<version>.fbx
-    <scene>_<version>.abc
-    <scene>_<version>_qc.mov
-    <scene_base>_track_afterEffects_<version>/
-      <scene>_<version>.jsx
-      <scene>_<version>_<geo1>.obj
-      <scene>_<version>_<geo2>.obj
+  <base>_track_<version>/
+    <base>_<version>.ma
+    <base>_<version>.fbx
+    <base>_<version>.abc
+    <base>_<version>_qc.mov
+    <base>_track_afterEffects_<version>/
+      <base>_<version>.jsx
+      <base>_<version>_<geo1>.obj
+      <base>_<version>_<geo2>.obj
 ```
 
 - Directories are created automatically if they don't exist
@@ -212,17 +217,26 @@ Version-aware folder naming with an After Effects subfolder for Camera Track out
 #### Playblast QC (.mov) — Both tabs
 - Renders a viewport playblast through the assigned camera (`cam_main`) at **1920x1080**
 - QuickTime format with **H.264** compression, quality 70
-- Output filename: `<scene>_<version>_qc.mov`
+- Output filename: `<base>_<version>_qc.mov`
 - Uses `cmds.playblast()` with `format="qt"`, `compression="H.264"`, `widthHeight=[1920, 1080]`
 - Finds a visible model panel for rendering (does not rely on `withFocus` since clicking Export shifts focus)
 - Switches the panel to the assigned camera via `cmds.lookThru()`, restores original camera afterward
-- **Display mode**: Camera track playblasts (Tab 1) use **wireframe** display. Matchmove playblasts (Tab 2) use **wireframe on shaded** (smoothShaded + wireframeOnShaded) with **polygons only** visible. All display settings are restored afterward.
-- **Anti-aliasing**: Both tabs enable multisampling AA (`hardwareRenderingGlobals.multiSampleEnable`, `multiSampleCount=16`) and smooth wireframe during the playblast, restored afterward
-- **Backface culling**: Enables full backface culling on all meshes during the playblast for cleaner QC review, restores original per-mesh culling values afterward
+- **2D Pan/Zoom disabled**: Camera `panZoomEnabled` is temporarily set to `False` during the playblast to prevent pan/zoom overrides from affecting the render
 - **Selection cleared**: Viewport selection is cleared before the playblast so no highlight appears, restored afterward
-- **Polygons only (Tab 2 only)**: For matchmove playblasts, all non-polygon object types are hidden (NURBS surfaces, subdivs, planes, lights, cameras, fluids, hair, nCloths, nParticles, strokes, etc.) along with rig elements (joints, nurbs curves, locators, handles, IK handles, deformers, dynamics, manipulators). Only polymeshes remain visible. All visibility settings are restored after the playblast.
-- **All geo visible (Tab 1 only)**: Camera track playblasts ensure polymeshes, NURBS surfaces, and subdiv surfaces are visible
 - **Platform-aware format**: Prefers `avfoundation` (macOS native) over `qt` (Windows QuickTime). If neither is available, shows a platform-appropriate popup dialog
+
+##### Camera Track Playblast (Tab 1)
+- **Wireframe display**: `displayAppearance="wireframe"` with smooth wireframe enabled
+- **Anti-aliasing**: Multisampling AA (`multiSampleEnable`, `multiSampleCount=16`)
+- **Backface culling**: Full backface culling on all meshes for cleaner wireframe review, restores original per-mesh culling values afterward
+- **All geo visible**: Ensures polymeshes, NURBS surfaces, and subdiv surfaces are visible
+
+##### Matchmove Playblast (Tab 2)
+- **Display layers forced visible**: All display layers have both `.visibility` and `.playback` attributes set to `True` before the playblast, ensuring nothing is hidden by layer overrides. Original values are saved and restored afterward.
+- **Isolate select**: Only the assigned Anim Geo Group roots (and their descendants) are shown via `cmds.isolateSelect()`. Hides rigs, proxy geo, locators, and all other scene objects. Restored afterward.
+- **Smooth shaded**: `displayAppearance="smoothShaded"` with `wireframeOnShaded=False`
+- **UV checker overlay**: A temporary shader network (`lambert` + `checker` + `place2dTexture`) is created with muted grey colors (`0.75`/`0.25`), `8x8` repeat, and assigned to all meshes within the isolated geo. `displayTextures` is enabled on the viewport. Original shading engines are saved and restored afterward; temporary `mme_uvChecker_*` nodes are deleted.
+- **T-pose excluded**: Uses the original timeline range for the playblast frame range, not the T-pose-adjusted start frame (FBX and ABC exports include the T-pose frame; the playblast does not)
 
 ### Progress Bar
 - Visual progress bar with percentage label shown during export
@@ -230,9 +244,17 @@ Version-aware folder naming with an After Effects subfolder for Camera Track out
 - JSX export counts as 2 steps (setup + timeline scrub) so the bar advances early before the slow frame-by-frame processing begins
 - Hidden after export completes
 
-### Error Handling
+### Pre-flight Validation & Name Collision Detection
 - Pre-flight validation before any export begins, per active tab
+- **Validation errors logged to Status panel** as well as shown in a popup dialog, so they remain visible after dismissing the popup
+- **Name collision detection**:
+  - **Duplicate picks**: Detects the same scene node assigned to multiple role fields (e.g., same node in Camera and Geo Group). Error message identifies both roles.
+  - **cam_main conflict**: If the picked camera is not already named `cam_main` and a node named `cam_main` already exists in the scene, an error is raised (the camera rename during export would conflict)
+  - **OBJ filename collisions** (Camera Track, JSX enabled): Checks that all geo children (after filtering chisels/nulls/camera) have unique short names. Duplicate names would produce overwriting OBJ files.
+
+### Error Handling
 - Per-format try/except (one format failing doesn't block others)
+- **Verbose Script Editor errors**: On export failure, `_log_error` writes a formatted error report to Maya's Script Editor via `sys.stderr` (displayed as red text), including the error tag, error message, and full Python traceback. The Status panel shows only a brief "FAILED (see Script Editor)" message.
 - Plugin auto-loading for FBX (`fbxmaya`), Alembic (`AbcExport`), and OBJ (`objExport`)
 - QuickTime availability check for playblast (popup if missing)
 - Selection state saved and restored after all exports

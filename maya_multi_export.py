@@ -1,5 +1,5 @@
 """
-maya_multi_export.py  v1.2.3
+maya_multi_export.py  v1.3.6
 Maya Multi-Export Tool — Export scenes to .ma, .fbx, .abc with auto versioning.
 
 Drag and drop this file into Maya's viewport to install.
@@ -12,6 +12,7 @@ import re
 import sys
 import shutil
 import base64
+import traceback
 from functools import partial
 
 import maya.cmds as cmds
@@ -21,7 +22,7 @@ import maya.mel as mel
 # Constants
 # ---------------------------------------------------------------------------
 TOOL_NAME = "maya_multi_export"
-TOOL_VERSION = "1.2.3"
+TOOL_VERSION = "1.3.6"
 WINDOW_NAME = "multiExportWindow"
 SHELF_BUTTON_LABEL = "MultiExport"
 ICON_FILENAME = "maya_multi_export.png"
@@ -47,35 +48,57 @@ class VersionParser(object):
     """Parse version from Maya scene filename using _v## pattern."""
 
     VERSION_PATTERN = re.compile(r"_v(\d{2,3})(?=\.|$)")
+    # Maya auto-increment suffix, e.g. ".001" in "shot_v01.001.ma"
+    INCREMENT_PATTERN = re.compile(r"\.\d{3,}(?=\.\w+$)")
+
+    @classmethod
+    def _strip_increment(cls, scene_name):
+        """Remove Maya's auto-increment suffix (.001) from a filename."""
+        return cls.INCREMENT_PATTERN.sub("", scene_name)
 
     @staticmethod
     def parse(scene_name):
         """Extract version from a scene filename.
 
+        Ignores Maya's auto-increment suffix (e.g. "shot_v01.001.ma" -> v01).
+
         Returns:
             tuple: (version_str, version_int) e.g. ("v01", 1)
                    or (None, None) if no version found.
         """
-        matches = VersionParser.VERSION_PATTERN.findall(scene_name)
+        clean = VersionParser._strip_increment(scene_name)
+        matches = VersionParser.VERSION_PATTERN.findall(clean)
         if matches:
             digits = matches[-1]  # Use the last match
-            return ("v" + digits, int(digits))
+            ver_int = int(digits)
+            return ("v{:02d}".format(ver_int), ver_int)
         return (None, None)
 
     @staticmethod
     def get_scene_base_name(scene_name):
-        """Return scene name stripped of version and extension.
+        """Return scene name stripped of version, task name, increment suffix,
+        and extension.
 
-        e.g. "shot_v01.ma" -> "shot"
+        The last underscore segment before the version is treated as the
+        task name and removed.
+
+        e.g. "shotNum_plateNum_taskName_v002.ma" -> "shotNum_plateNum"
+             "shot_task_v01.001.ma" -> "shot"
+             "shot_v01.ma" -> "shot"
         """
-        name_no_ext = os.path.splitext(scene_name)[0]
+        clean = VersionParser._strip_increment(scene_name)
+        name_no_ext = os.path.splitext(clean)[0]
         # Remove the last _v## occurrence
         parts = VersionParser.VERSION_PATTERN.findall(name_no_ext)
         if parts:
             last_ver = "_v" + parts[-1]
             idx = name_no_ext.rfind(last_ver)
             if idx >= 0:
-                return name_no_ext[:idx]
+                base = name_no_ext[:idx]
+                # Drop the last underscore segment (task name)
+                if "_" in base:
+                    base = base.rsplit("_", 1)[0]
+                return base
         return name_no_ext
 
 
@@ -86,8 +109,13 @@ class FolderManager(object):
     """Create and manage export folder structure."""
 
     @staticmethod
-    def build_export_paths(export_root, scene_base_name, version_str):
+    def build_export_paths(export_root, scene_base_name, version_str,
+                           tag="cam"):
         """Build the full set of export paths.
+
+        Args:
+            tag: Naming tag inserted between base name and version.
+                 "cam" for Camera Track, "charMM" for Matchmove.
 
         Returns:
             dict: {"ma": path, "fbx": path, "abc": path, "mov": path}
@@ -96,13 +124,13 @@ class FolderManager(object):
         dir_name = "{}_track_{}".format(scene_base_name, version_str)
         dir_path = os.path.join(export_root, dir_name)
         for fmt, ext in [("ma", ".ma"), ("fbx", ".fbx"), ("abc", ".abc")]:
-            file_name = "{base}_{ver}{ext}".format(
-                base=scene_base_name, ver=version_str, ext=ext
+            file_name = "{base}_{tag}_{ver}{ext}".format(
+                base=scene_base_name, tag=tag, ver=version_str, ext=ext
             )
             paths[fmt] = os.path.join(dir_path, file_name)
-        # QC playblast gets a _qc suffix
-        qc_name = "{base}_{ver}_qc.mov".format(
-            base=scene_base_name, ver=version_str
+        # QC playblast
+        qc_name = "{base}_{tag}_qc_{ver}.mov".format(
+            base=scene_base_name, tag=tag, ver=version_str
         )
         paths["mov"] = os.path.join(dir_path, qc_name)
         return paths
@@ -135,12 +163,12 @@ class FolderManager(object):
             scene_base_name, version_str
         )
         ae_dir = os.path.join(export_root, main_dir_name, ae_dir_name)
-        jsx_name = "{base}_{ver}.jsx".format(
+        jsx_name = "{base}_ae_{ver}.jsx".format(
             base=scene_base_name, ver=version_str
         )
         paths = {"jsx": os.path.join(ae_dir, jsx_name), "obj": {}}
         for geo_name in geo_names:
-            obj_name = "{base}_{ver}_{geo}.obj".format(
+            obj_name = "{base}_cam_{ver}_{geo}.obj".format(
                 base=scene_base_name, ver=version_str, geo=geo_name
             )
             paths["obj"][geo_name] = os.path.join(ae_dir, obj_name)
@@ -224,6 +252,25 @@ class Exporter(object):
     def __init__(self, log_callback):
         self.log = log_callback
 
+    def _log_error(self, tag, exception):
+        """Dump a verbose, readable error report to Maya's Script Editor
+        (stderr shows as red text) so the artist can copy/paste it for
+        support.  The in-tool UI log is kept short."""
+        tb_str = traceback.format_exc()
+        divider = "=" * 60
+        sys.stderr.write(
+            "\n{div}\n"
+            "  MULTI-EXPORT  —  {tag} FAILED\n"
+            "{div}\n"
+            "\n"
+            "  Error : {err}\n"
+            "\n"
+            "  Traceback (most recent call last):\n"
+            "{tb}\n"
+            "{div}\n\n".format(
+                div=divider, tag=tag.upper(), err=exception, tb=tb_str)
+        )
+
     @staticmethod
     def _is_descendant_of(node, ancestor):
         """Return True if *node* is the same as or a descendant of *ancestor*."""
@@ -274,10 +321,9 @@ class Exporter(object):
                 force=True,
                 preserveReferences=False,
             )
-            self.log("[MA] Exported: " + file_path)
             return True
         except Exception as e:
-            self.log("[MA] FAILED: " + str(e))
+            self._log_error("MA", e)
             return False
 
     def export_fbx(self, file_path, camera, geo_roots, rig_roots, proxy_geo,
@@ -359,10 +405,9 @@ class Exporter(object):
             mel_path = file_path.replace("\\", "/")
             mel.eval('FBXExport -f "{}" -s'.format(mel_path))
 
-            self.log("[FBX] Exported: " + file_path)
             return True
         except Exception as e:
-            self.log("[FBX] FAILED: " + str(e))
+            self._log_error("FBX", e)
             return False
 
     def export_abc(self, file_path, camera, geo_roots, proxy_geo,
@@ -434,10 +479,9 @@ class Exporter(object):
             )
 
             cmds.AbcExport(j=job_string)
-            self.log("[ABC] Exported: " + file_path)
             return True
         except Exception as e:
-            self.log("[ABC] FAILED: " + str(e))
+            self._log_error("ABC", e)
             return False
 
     # --- OBJ Export ---
@@ -484,10 +528,9 @@ class Exporter(object):
                 # Always restore the original transform.
                 cmds.xform(geo_node, worldSpace=True, matrix=orig_m)
 
-            self.log("[OBJ] Exported: " + file_path)
             return True
         except Exception as e:
-            self.log("[OBJ] FAILED: " + str(e))
+            self._log_error("OBJ", e)
             return False
 
     @staticmethod
@@ -515,14 +558,22 @@ class Exporter(object):
             return False
 
     def export_playblast(self, file_path, camera, start_frame, end_frame,
-                         hide_rig_elements=False):
+                         camera_track_mode=False, matchmove_geo=None,
+                         checker_scale=8, checker_color=None,
+                         checker_opacity=70):
         """Export a QC playblast as H.264 .mov via QuickTime at 1920x1080.
 
         Args:
-            hide_rig_elements: If True, hides joints, nurbs curves,
-                locators, and handles in the viewport so only skin
-                geometry and static geo are visible (Matchmove tab).
+            camera_track_mode: If True, applies Camera Track viewport
+                overrides (wireframe, backface culling, AA).
+            matchmove_geo: Optional list of geo root transforms for the
+                Matchmove tab.  When provided, forces display layers
+                visible, isolates only these geo roots, sets smooth
+                shaded display, and applies a UV checker overlay.
         """
+        matchmove_geo = [
+            g for g in (matchmove_geo or []) if g and cmds.objExists(g)
+        ]
         try:
             # Check .mov format availability:
             #   macOS: "avfoundation" (native)
@@ -550,89 +601,85 @@ class Exporter(object):
                 return False
 
             # Find a visible model panel for the playblast.
-            # Cannot rely on withFocus — clicking EXPORT shifts focus
-            # to the tool window, not a model panel.
             model_panel = None
             for panel in (cmds.getPanel(visiblePanels=True) or []):
                 if cmds.getPanel(typeOf=panel) == "modelPanel":
                     model_panel = panel
                     break
             if not model_panel:
-                # Fallback to any model panel
                 panels = cmds.getPanel(type="modelPanel") or []
                 if panels:
                     model_panel = panels[0]
 
+            # Switch camera
             original_cam = None
+            original_pan_zoom = None
             if camera and model_panel:
                 original_cam = cmds.modelPanel(
                     model_panel, query=True, camera=True
                 )
                 cmds.lookThru(model_panel, camera)
 
+            # Disable 2D pan/zoom — animation aid, not for QC renders.
+            if camera:
+                cam_shapes = cmds.listRelatives(
+                    camera, shapes=True, type="camera") or []
+                if cam_shapes:
+                    try:
+                        original_pan_zoom = cmds.getAttr(
+                            cam_shapes[0] + ".panZoomEnabled")
+                        cmds.setAttr(
+                            cam_shapes[0] + ".panZoomEnabled", False)
+                    except Exception:
+                        pass
+
             # Clear selection so no highlight appears in the playblast
             original_sel = cmds.ls(selection=True)
             cmds.select(clear=True)
 
-            # Set viewport display mode:
-            #   Matchmove -> wireframe on shaded, AA on, polygons only
-            #   Camera track -> wireframe
+            # --- Camera Track overrides (wireframe + culling + AA) ---
             original_display = None
-            original_wos = None
             original_aa = None
-            target_display = "smoothShaded" if hide_rig_elements else "wireframe"
-            if model_panel:
+            original_msaa_count = None
+            original_smooth_wire = None
+            original_editor_vis = {}
+            original_culling = {}
+
+            if camera_track_mode and model_panel:
+                # Wireframe display
                 original_display = cmds.modelEditor(
                     model_panel, query=True, displayAppearance=True
                 )
-                if original_display != target_display:
+                if original_display != "wireframe":
                     cmds.modelEditor(
                         model_panel, edit=True,
-                        displayAppearance=target_display,
-                    )
-                if hide_rig_elements:
-                    original_wos = cmds.modelEditor(
-                        model_panel, query=True, wireframeOnShaded=True
-                    )
-                    cmds.modelEditor(
-                        model_panel, edit=True, wireframeOnShaded=True
+                        displayAppearance="wireframe",
                     )
 
-            # Enable anti-aliasing, multisampling, and smooth wireframe
-            original_msaa_count = None
-            original_smooth_wire = None
-            try:
-                original_aa = cmds.getAttr(
-                    "hardwareRenderingGlobals.multiSampleEnable"
-                )
-                cmds.setAttr(
-                    "hardwareRenderingGlobals.multiSampleEnable", True
-                )
-            except Exception:
-                pass
-            try:
-                original_msaa_count = cmds.getAttr(
-                    "hardwareRenderingGlobals.multiSampleCount"
-                )
-                cmds.setAttr(
-                    "hardwareRenderingGlobals.multiSampleCount", 16
-                )
-            except Exception:
-                pass
-            if model_panel:
+                # Anti-aliasing
+                try:
+                    original_aa = cmds.getAttr(
+                        "hardwareRenderingGlobals.multiSampleEnable")
+                    cmds.setAttr(
+                        "hardwareRenderingGlobals.multiSampleEnable", True)
+                except Exception:
+                    pass
+                try:
+                    original_msaa_count = cmds.getAttr(
+                        "hardwareRenderingGlobals.multiSampleCount")
+                    cmds.setAttr(
+                        "hardwareRenderingGlobals.multiSampleCount", 16)
+                except Exception:
+                    pass
                 try:
                     original_smooth_wire = cmds.modelEditor(
-                        model_panel, query=True, smoothWireframe=True
-                    )
+                        model_panel, query=True, smoothWireframe=True)
                     cmds.modelEditor(
-                        model_panel, edit=True, smoothWireframe=True
-                    )
+                        model_panel, edit=True, smoothWireframe=True)
                 except Exception:
                     pass
 
-            # Camera track: ensure all geometry is visible
-            original_editor_vis = {}
-            if not hide_rig_elements and model_panel:
+                # Ensure geometry types are visible
                 for flag in ("polymeshes", "nurbsSurfaces",
                              "subdivSurfaces"):
                     try:
@@ -643,49 +690,290 @@ class Exporter(object):
                     except Exception:
                         pass
 
-            # Matchmove: hide all non-polygon object types and rig elements
-            # so only skin geometry and static geo are visible.
-            original_rig_vis = {}
-            if hide_rig_elements and model_panel:
-                for flag in ("joints", "nurbsCurves", "locators",
-                             "handles", "ikHandles", "deformers",
-                             "dynamics", "manipulators",
-                             "nurbsSurfaces", "subdivSurfaces",
-                             "planes", "lights", "cameras",
-                             "controlVertices", "hulls",
-                             "fluids", "hairSystems", "follicles",
-                             "nCloths", "nParticles", "nRigids",
-                             "strokes", "motionTrails",
-                             "dimensions", "pivots", "grid"):
+                # Backface culling
+                all_meshes = cmds.ls(type="mesh", long=True) or []
+                for mesh in all_meshes:
                     try:
-                        original_rig_vis[flag] = cmds.modelEditor(
-                            model_panel, query=True, **{flag: True})
-                        cmds.modelEditor(
-                            model_panel, edit=True, **{flag: False})
+                        original_culling[mesh] = cmds.getAttr(
+                            mesh + ".backfaceCulling")
+                        cmds.setAttr(mesh + ".backfaceCulling", 1)
                     except Exception:
                         pass
-                # Ensure polymeshes are visible
+
+            # --- Matchmove overrides ---
+            original_layer_vis = {}
+            original_layer_playback = {}
+            original_isolate_state = False
+            original_mm_display = None
+            original_mm_wos = None
+            original_mm_smooth_wire = None
+            original_mm_aa = None
+            original_mm_msaa_count = None
+            original_mm_motion_blur = None
+            original_shading = {}
+            checker_nodes = []
+            original_display_textures = None
+            original_display_lights = None
+            original_use_default_mtl = None
+            original_image_plane = None
+            mm_meshes = []
+
+            if matchmove_geo and model_panel:
+                # 1. Force all display layers visible so nothing is
+                #    hidden by layer overrides during the playblast.
+                for layer in (cmds.ls(type="displayLayer") or []):
+                    if layer == "defaultLayer":
+                        continue
+                    try:
+                        original_layer_vis[layer] = cmds.getAttr(
+                            layer + ".visibility")
+                        cmds.setAttr(layer + ".visibility", True)
+                    except Exception:
+                        pass
+                    try:
+                        original_layer_playback[layer] = cmds.getAttr(
+                            layer + ".hideOnPlayback")
+                        cmds.setAttr(layer + ".hideOnPlayback", False)
+                    except Exception:
+                        pass
+
+                # 2. Isolate select — show only the animated geo roots,
+                #    the camera, and its image planes.
+                original_isolate_state = cmds.isolateSelect(
+                    model_panel, query=True, state=True)
+                cmds.isolateSelect(model_panel, state=True)
+                for geo_root in matchmove_geo:
+                    cmds.isolateSelect(
+                        model_panel, addDagObject=geo_root)
+                # Add the camera and its image planes so the
+                # plate sequence is visible in the background.
+                if camera:
+                    try:
+                        cmds.isolateSelect(
+                            model_panel, addDagObject=camera)
+                    except Exception:
+                        pass
+                    cam_shapes = cmds.listRelatives(
+                        camera, shapes=True, type="camera") or []
+                    for cs in cam_shapes:
+                        img_planes = cmds.listConnections(
+                            cs + ".imagePlane",
+                            type="imagePlane") or []
+                        for ip in img_planes:
+                            try:
+                                cmds.isolateSelect(
+                                    model_panel, addDagObject=ip)
+                            except Exception:
+                                pass
+
+                # 3. Enable image planes on the viewport
+                original_image_plane = cmds.modelEditor(
+                    model_panel, query=True, imagePlane=True)
+                cmds.modelEditor(
+                    model_panel, edit=True, imagePlane=True)
+
+                # 4. Smooth shaded, no wireframe overlay
+                original_mm_display = cmds.modelEditor(
+                    model_panel, query=True, displayAppearance=True)
+                cmds.modelEditor(
+                    model_panel, edit=True,
+                    displayAppearance="smoothShaded")
+                original_mm_wos = cmds.modelEditor(
+                    model_panel, query=True, wireframeOnShaded=True)
+                cmds.modelEditor(
+                    model_panel, edit=True, wireframeOnShaded=False)
+
+                # 5. Smooth wireframe + MSAA 16 + motion blur
                 try:
-                    original_rig_vis["polymeshes"] = cmds.modelEditor(
-                        model_panel, query=True, polymeshes=True)
+                    original_mm_smooth_wire = cmds.modelEditor(
+                        model_panel, query=True, smoothWireframe=True)
                     cmds.modelEditor(
-                        model_panel, edit=True, polymeshes=True)
+                        model_panel, edit=True, smoothWireframe=True)
+                except Exception:
+                    pass
+                try:
+                    original_mm_aa = cmds.getAttr(
+                        "hardwareRenderingGlobals.multiSampleEnable")
+                    cmds.setAttr(
+                        "hardwareRenderingGlobals.multiSampleEnable", True)
+                except Exception:
+                    pass
+                try:
+                    original_mm_msaa_count = cmds.getAttr(
+                        "hardwareRenderingGlobals.multiSampleCount")
+                    cmds.setAttr(
+                        "hardwareRenderingGlobals.multiSampleCount", 16)
+                except Exception:
+                    pass
+                try:
+                    original_mm_motion_blur = cmds.getAttr(
+                        "hardwareRenderingGlobals.motionBlurEnable")
+                    cmds.setAttr(
+                        "hardwareRenderingGlobals.motionBlurEnable", True)
                 except Exception:
                     pass
 
-            # Enable backface culling (Full) on all meshes for cleaner QC
-            all_meshes = cmds.ls(type="mesh", long=True) or []
-            original_culling = {}
-            for mesh in all_meshes:
+                # 6. UV checker overlay
                 try:
-                    original_culling[mesh] = cmds.getAttr(
-                        mesh + ".backfaceCulling"
+                    # Collect mesh transforms under the geo roots
+                    for geo_root in matchmove_geo:
+                        descendants = cmds.listRelatives(
+                            geo_root, allDescendents=True,
+                            type="mesh", fullPath=True) or []
+                        for m in descendants:
+                            try:
+                                if not cmds.getAttr(
+                                        m + ".intermediateObject"):
+                                    mm_meshes.append(m)
+                            except Exception:
+                                pass
+                    # Resolve to transforms for shader assignment
+                    mm_transforms = list(set(
+                        cmds.listRelatives(
+                            mm_meshes, parent=True,
+                            fullPath=True) or []
+                    )) if mm_meshes else []
+
+                    sys.stderr.write(
+                        "[MME] UV Checker: {} meshes, "
+                        "{} transforms found\n".format(
+                            len(mm_meshes), len(mm_transforms)))
+
+                    # Save original shading assignments
+                    for mesh in mm_meshes:
+                        try:
+                            sgs = cmds.listConnections(
+                                mesh, type="shadingEngine") or []
+                            if sgs:
+                                original_shading[mesh] = sgs[0]
+                        except Exception:
+                            pass
+
+                    # Create checker shader network
+                    chk_lambert = cmds.shadingNode(
+                        "lambert", asShader=True,
+                        name="mme_uvChecker_mtl")
+                    checker_nodes.append(chk_lambert)
+                    transp = 1.0 - (checker_opacity / 100.0)
+                    cmds.setAttr(
+                        "{}.transparency".format(chk_lambert),
+                        transp, transp, transp, type="double3")
+
+                    chk_sg = cmds.sets(
+                        renderable=True, noSurfaceShader=True,
+                        empty=True, name="mme_uvChecker_SG")
+                    checker_nodes.append(chk_sg)
+                    cmds.connectAttr(
+                        "{}.outColor".format(chk_lambert),
+                        "{}.surfaceShader".format(chk_sg),
+                        force=True)
+
+                    chk_color = checker_color or (0.75, 0.75, 0.75)
+                    chk_color2 = (
+                        chk_color[0] * 0.33,
+                        chk_color[1] * 0.33,
+                        chk_color[2] * 0.33,
                     )
-                    cmds.setAttr(mesh + ".backfaceCulling", 3)
-                except Exception:
-                    pass
+                    chk_tex = cmds.shadingNode(
+                        "checker", asTexture=True,
+                        name="mme_uvChecker_tex")
+                    checker_nodes.append(chk_tex)
+                    cmds.setAttr(
+                        "{}.color1".format(chk_tex),
+                        chk_color[0], chk_color[1], chk_color[2],
+                        type="double3")
+                    cmds.setAttr(
+                        "{}.color2".format(chk_tex),
+                        chk_color2[0], chk_color2[1], chk_color2[2],
+                        type="double3")
+
+                    chk_place = cmds.shadingNode(
+                        "place2dTexture", asUtility=True,
+                        name="mme_uvChecker_place")
+                    checker_nodes.append(chk_place)
+                    repeat = max(1, 33 - checker_scale)
+                    cmds.setAttr("{}.repeatU".format(chk_place),
+                                 repeat)
+                    cmds.setAttr("{}.repeatV".format(chk_place),
+                                 repeat)
+
+                    # Standard place2dTexture -> checker connections
+                    # (VP2.0 requires the full set for proper display)
+                    for attr in (
+                        "coverage", "translateFrame", "rotateFrame",
+                        "mirrorU", "mirrorV", "stagger", "wrapU",
+                        "wrapV", "repeatUV", "offset", "rotateUV",
+                        "noiseUV", "vertexUvOne", "vertexUvTwo",
+                        "vertexUvThree", "vertexCameraOne",
+                    ):
+                        if (cmds.attributeQuery(
+                                attr, node=chk_place, exists=True)
+                                and cmds.attributeQuery(
+                                    attr, node=chk_tex, exists=True)):
+                            cmds.connectAttr(
+                                "{}.{}".format(chk_place, attr),
+                                "{}.{}".format(chk_tex, attr),
+                                force=True)
+                    cmds.connectAttr(
+                        "{}.outUV".format(chk_place),
+                        "{}.uvCoord".format(chk_tex),
+                        force=True)
+                    cmds.connectAttr(
+                        "{}.outUvFilterSize".format(chk_place),
+                        "{}.uvFilterSize".format(chk_tex),
+                        force=True)
+                    cmds.connectAttr(
+                        "{}.outColor".format(chk_tex),
+                        "{}.color".format(chk_lambert),
+                        force=True)
+
+                    # Assign checker via hyperShade (the standard Maya
+                    # API for shader assignment — more reliable than
+                    # cmds.sets for VP2.0 texture display).
+                    if mm_transforms:
+                        cmds.select(mm_transforms, replace=True)
+                        cmds.hyperShade(assign=chk_lambert)
+                        cmds.select(clear=True)
+
+                    sys.stderr.write(
+                        "[MME] UV Checker: assigned to "
+                        "{} transforms\n".format(len(mm_transforms)))
+
+                    # Disable useDefaultMaterial so our checker
+                    # actually shows (not the default grey lambert)
+                    original_use_default_mtl = cmds.modelEditor(
+                        model_panel, query=True,
+                        useDefaultMaterial=True)
+                    cmds.modelEditor(
+                        model_panel, edit=True,
+                        useDefaultMaterial=False)
+
+                    # Enable textured display with default lighting
+                    original_display_textures = cmds.modelEditor(
+                        model_panel, query=True, displayTextures=True)
+                    original_display_lights = cmds.modelEditor(
+                        model_panel, query=True, displayLights=True)
+                    cmds.modelEditor(
+                        model_panel, edit=True,
+                        displayTextures=True,
+                        displayLights="default")
+
+                    # Force VP2.0 to fully rebuild its render cache
+                    # so the new procedural checker texture is
+                    # evaluated and ready for playblast capture.
+                    cmds.ogs(reset=True)
+                    cmds.currentTime(
+                        cmds.currentTime(query=True))
+                    cmds.refresh(force=True)
+                except Exception as exc:
+                    self._log_error("UV Checker", exc)
 
             try:
+                # Ensure the model panel we configured is the active
+                # viewport — playblast renders from the focused panel.
+                if model_panel:
+                    cmds.setFocus(model_panel)
+
                 # Strip .mov — playblast appends extension automatically
                 path_no_ext = file_path
                 if path_no_ext.lower().endswith(".mov"):
@@ -707,31 +995,21 @@ class Exporter(object):
                     quality=70,
                     widthHeight=[1920, 1080],
                 )
-                self.log("[Playblast] Exported: " + file_path)
                 return True
             finally:
-                # Restore original backface culling values
+                # --- Restore Camera Track overrides ---
                 for mesh, val in original_culling.items():
                     try:
                         if cmds.objExists(mesh):
                             cmds.setAttr(mesh + ".backfaceCulling", val)
                     except Exception:
                         pass
-                # Restore viewport object type visibility
-                for flag, val in original_rig_vis.items():
-                    try:
-                        cmds.modelEditor(
-                            model_panel, edit=True, **{flag: val})
-                    except Exception:
-                        pass
-                # Restore camera track editor visibility
                 for flag, val in original_editor_vis.items():
                     try:
                         cmds.modelEditor(
                             model_panel, edit=True, **{flag: val})
                     except Exception:
                         pass
-                # Restore anti-aliasing
                 if original_aa is not None:
                     try:
                         cmds.setAttr(
@@ -739,7 +1017,6 @@ class Exporter(object):
                             original_aa)
                     except Exception:
                         pass
-                # Restore multisampling count
                 if original_msaa_count is not None:
                     try:
                         cmds.setAttr(
@@ -747,7 +1024,6 @@ class Exporter(object):
                             original_msaa_count)
                     except Exception:
                         pass
-                # Restore smooth wireframe
                 if original_smooth_wire is not None and model_panel:
                     try:
                         cmds.modelEditor(
@@ -755,33 +1031,139 @@ class Exporter(object):
                             smoothWireframe=original_smooth_wire)
                     except Exception:
                         pass
-                # Restore wireframe on shaded
-                if original_wos is not None and model_panel:
-                    try:
-                        cmds.modelEditor(
-                            model_panel, edit=True,
-                            wireframeOnShaded=original_wos)
-                    except Exception:
-                        pass
-                # Restore original display appearance
-                if original_display and original_display != target_display:
+                if original_display and original_display != "wireframe":
                     cmds.modelEditor(
                         model_panel, edit=True,
                         displayAppearance=original_display,
                     )
-                # Restore original camera in panel
+
+                # --- Restore Matchmove overrides ---
+                # Restore shading before deleting checker nodes
+                for mesh, sg in original_shading.items():
+                    try:
+                        if cmds.objExists(mesh) and cmds.objExists(sg):
+                            cmds.sets(mesh, edit=True,
+                                      forceElement=sg)
+                    except Exception:
+                        pass
+                if original_display_textures is not None and model_panel:
+                    try:
+                        cmds.modelEditor(
+                            model_panel, edit=True,
+                            displayTextures=original_display_textures)
+                    except Exception:
+                        pass
+                if original_display_lights is not None and model_panel:
+                    try:
+                        cmds.modelEditor(
+                            model_panel, edit=True,
+                            displayLights=original_display_lights)
+                    except Exception:
+                        pass
+                if original_use_default_mtl is not None and model_panel:
+                    try:
+                        cmds.modelEditor(
+                            model_panel, edit=True,
+                            useDefaultMaterial=original_use_default_mtl)
+                    except Exception:
+                        pass
+                if original_image_plane is not None and model_panel:
+                    try:
+                        cmds.modelEditor(
+                            model_panel, edit=True,
+                            imagePlane=original_image_plane)
+                    except Exception:
+                        pass
+                for node in checker_nodes:
+                    try:
+                        if cmds.objExists(node):
+                            cmds.delete(node)
+                    except Exception:
+                        pass
+                # Restore display appearance
+                if original_mm_display is not None and model_panel:
+                    cmds.modelEditor(
+                        model_panel, edit=True,
+                        displayAppearance=original_mm_display)
+                if original_mm_wos is not None and model_panel:
+                    try:
+                        cmds.modelEditor(
+                            model_panel, edit=True,
+                            wireframeOnShaded=original_mm_wos)
+                    except Exception:
+                        pass
+                if original_mm_smooth_wire is not None and model_panel:
+                    try:
+                        cmds.modelEditor(
+                            model_panel, edit=True,
+                            smoothWireframe=original_mm_smooth_wire)
+                    except Exception:
+                        pass
+                if original_mm_aa is not None:
+                    try:
+                        cmds.setAttr(
+                            "hardwareRenderingGlobals.multiSampleEnable",
+                            original_mm_aa)
+                    except Exception:
+                        pass
+                if original_mm_msaa_count is not None:
+                    try:
+                        cmds.setAttr(
+                            "hardwareRenderingGlobals.multiSampleCount",
+                            original_mm_msaa_count)
+                    except Exception:
+                        pass
+                if original_mm_motion_blur is not None:
+                    try:
+                        cmds.setAttr(
+                            "hardwareRenderingGlobals.motionBlurEnable",
+                            original_mm_motion_blur)
+                    except Exception:
+                        pass
+                # Restore isolate select
+                if model_panel:
+                    try:
+                        cmds.isolateSelect(
+                            model_panel,
+                            state=original_isolate_state)
+                    except Exception:
+                        pass
+                # Restore display layer visibility and playback
+                for layer, val in original_layer_vis.items():
+                    try:
+                        if cmds.objExists(layer):
+                            cmds.setAttr(
+                                layer + ".visibility", val)
+                    except Exception:
+                        pass
+                for layer, val in original_layer_playback.items():
+                    try:
+                        if cmds.objExists(layer):
+                            cmds.setAttr(
+                                layer + ".hideOnPlayback", val)
+                    except Exception:
+                        pass
+
+                # --- Shared restores ---
+                if original_pan_zoom is not None and camera:
+                    cam_shapes = cmds.listRelatives(
+                        camera, shapes=True, type="camera") or []
+                    if cam_shapes:
+                        try:
+                            cmds.setAttr(
+                                cam_shapes[0] + ".panZoomEnabled",
+                                original_pan_zoom)
+                        except Exception:
+                            pass
                 if original_cam and model_panel:
                     cmds.lookThru(model_panel, original_cam)
-                # Restore original selection
                 if original_sel:
                     try:
                         cmds.select(original_sel, replace=True)
                     except Exception:
                         pass
         except Exception as e:
-            import traceback
-            self.log("[Playblast] FAILED: " + str(e))
-            self.log(traceback.format_exc())
+            self._log_error("Playblast", e)
             return False
 
     # --- JSX Helper Methods ---
@@ -1408,7 +1790,6 @@ class Exporter(object):
 
             # Camera
             if camera:
-                self.log("[JSX] Processing camera: {}".format(camera))
                 cam_jsx = self._jsx_camera(
                     camera, start_frame, end_frame, fps,
                     comp_width, comp_height, ae_scale
@@ -1434,16 +1815,10 @@ class Exporter(object):
 
                     # Skip chisels groups entirely
                     if "chisels" in child_lower:
-                        self.log("[JSX] Skipping chisels group: {}".format(
-                            child))
                         continue
 
                     # Nulls groups: each locator becomes a position-only null
                     if "nulls" in child_lower:
-                        self.log(
-                            "[JSX] Processing tracker nulls group: {}".format(
-                                child)
-                        )
                         locator_transforms = cmds.listRelatives(
                             child, children=True, type="transform"
                         ) or []
@@ -1455,9 +1830,6 @@ class Exporter(object):
                             )
                             if not shapes:
                                 continue
-                            self.log(
-                                "[JSX] Processing locator: {}".format(loc_tfm)
-                            )
                             loc_jsx = self._jsx_null_from_locator(
                                 loc_tfm, start_frame, end_frame,
                                 fps, comp_width, comp_height, ae_scale
@@ -1467,8 +1839,6 @@ class Exporter(object):
 
                     # Simple planes → AE solid (no OBJ needed)
                     if self._is_simple_plane(child):
-                        self.log("[JSX] Processing plane as solid: {}".format(
-                            child))
                         geo_jsx = self._jsx_solid_from_plane(
                             child, start_frame, end_frame,
                             fps, comp_width, comp_height, ae_scale
@@ -1482,7 +1852,6 @@ class Exporter(object):
                     obj_path = obj_paths[child]
                     obj_filename = os.path.basename(obj_path)
 
-                    self.log("[JSX] Processing geo: {}".format(child))
                     self.export_obj(obj_path, child)
 
                     geo_jsx = self._jsx_mesh_from_geo(
@@ -1503,8 +1872,6 @@ class Exporter(object):
                     except ValueError:
                         # Different drives on Windows — keep absolute
                         footage_path = img_path
-                    self.log("[JSX] Including source footage: {}".format(
-                        footage_path))
                     jsx_lines.extend(self._jsx_footage(
                         footage_path, fps, duration,
                         comp_width, comp_height))
@@ -1516,10 +1883,9 @@ class Exporter(object):
             with open(jsx_path, "w") as f:
                 f.write("\n".join(jsx_lines))
 
-            self.log("[JSX] Exported: " + jsx_path)
             return True
         except Exception as e:
-            self.log("[JSX] FAILED: " + str(e))
+            self._log_error("JSX", e)
             return False
 
 
@@ -1562,6 +1928,9 @@ class MultiExportUI(object):
         self.mm_ma_checkbox = None
         self.mm_fbx_checkbox = None
         self.mm_abc_checkbox = None
+        self.mm_checker_scale = None
+        self.mm_checker_color = None
+        self.mm_checker_opacity = None
         self.mm_mov_checkbox = None
 
     def show(self):
@@ -1642,8 +2011,16 @@ class MultiExportUI(object):
             font="smallObliqueLabelFont",
         )
 
-        # Populate scene info
+        # Populate scene info and auto-refresh on scene open/save
         self._refresh_scene_info()
+        self._scene_jobs = []
+        for event in ("SceneOpened", "SceneSaved", "NewSceneOpened"):
+            job_id = cmds.scriptJob(
+                event=[event, self._refresh_scene_info],
+                parent=self.window,
+            )
+            self._scene_jobs.append(job_id)
+
         # Auto-set timeline range
         self._set_timeline_range()
 
@@ -1689,7 +2066,7 @@ class MultiExportUI(object):
 
         # Node Picker
         cmds.frameLayout(
-            label="Node Picker  (In the outliner > choose parent nodes)",
+            label="Node Picker  (In the outliner)",
             collapsable=True,
             marginWidth=8,
             marginHeight=6,
@@ -1709,7 +2086,7 @@ class MultiExportUI(object):
         )
 
         self.ct_geo_root_field = cmds.textFieldButtonGrp(
-            label="Geo Node:",
+            label="Geo Group:",
             buttonLabel="<< Load Sel",
             columnWidth3=(70, 260, 80),
             editable=False,
@@ -1758,7 +2135,7 @@ class MultiExportUI(object):
 
         # Node Picker
         cmds.frameLayout(
-            label="Node Picker  (In the outliner > choose parent nodes)",
+            label="Node Picker  (In the outliner)",
             collapsable=True,
             marginWidth=8,
             marginHeight=6,
@@ -1845,6 +2222,35 @@ class MultiExportUI(object):
         )
         cmds.text(label="")
         cmds.setParent("..")
+        cmds.separator(style="in", height=12)
+        cmds.text(label="QC Checker Overlay", align="left",
+                  font="smallBoldLabelFont")
+        cmds.separator(style="none", height=4)
+        self.mm_checker_color = cmds.colorSliderGrp(
+            label="Color:",
+            rgb=(0.7, 0.25, 0.25),
+            columnWidth3=(40, 80, 1),
+        )
+        self.mm_checker_scale = cmds.intSliderGrp(
+            label="Scale:",
+            field=True,
+            minValue=1,
+            maxValue=32,
+            fieldMinValue=1,
+            fieldMaxValue=32,
+            value=15,
+            columnWidth3=(40, 50, 1),
+        )
+        self.mm_checker_opacity = cmds.intSliderGrp(
+            label="Opacity:",
+            field=True,
+            minValue=0,
+            maxValue=100,
+            fieldMinValue=0,
+            fieldMaxValue=100,
+            value=15,
+            columnWidth3=(40, 50, 1),
+        )
         cmds.setParent("..")
         cmds.setParent("..")
 
@@ -1879,7 +2285,7 @@ class MultiExportUI(object):
 
     def _build_log(self):
         cmds.frameLayout(
-            label="Log",
+            label="Status",
             collapsable=True,
             marginWidth=8,
             marginHeight=6,
@@ -2011,7 +2417,7 @@ class MultiExportUI(object):
         cmds.setParent("..")  # out of container
 
     def _add_rig_geo_pair(self, *args):
-        """Add a new Rig Node / Animated Geo Node pair to the matchmove tab."""
+        """Add a new Ctrl Rig Group / Anim Geo Group pair to the matchmove tab."""
         # Remove button row so the new pair is inserted before it
         if self.mm_btn_row:
             cmds.deleteUI(self.mm_btn_row)
@@ -2024,7 +2430,7 @@ class MultiExportUI(object):
         row = cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
 
         rig_field = cmds.textFieldButtonGrp(
-            label="Rig Node{}:".format(suffix),
+            label="Ctrl Rig Group{}:".format(suffix),
             buttonLabel="<< Load Sel",
             columnWidth3=(90, 240, 80),
             editable=False,
@@ -2035,7 +2441,7 @@ class MultiExportUI(object):
         )
 
         geo_field = cmds.textFieldButtonGrp(
-            label="Anim Geo Node{}:".format(suffix),
+            label="Anim Geo Group{}:".format(suffix),
             buttonLabel="<< Load Sel",
             columnWidth3=(90, 240, 80),
             editable=False,
@@ -2063,7 +2469,7 @@ class MultiExportUI(object):
             cmds.window(self.window, edit=True, height=cur_h + 52)
 
     def _remove_rig_geo_pair(self, *args):
-        """Remove the last Rig Node / Animated Geo Node pair."""
+        """Remove the last Ctrl Rig Group / Anim Geo Group pair."""
         if len(self.mm_rig_geo_pairs) <= 1:
             return
 
@@ -2161,6 +2567,17 @@ class MultiExportUI(object):
         cmds.scrollField(
             self.log_field, edit=True, insertionPosition=len(updated)
         )
+
+    def _log_result(self, label, success):
+        """Append a single-line task result to the log.
+
+        success=True  -> 'MA ... done'
+        success=False -> 'MA ... FAILED  (see Script Editor)'
+        """
+        if success:
+            self._log("{} ... done".format(label))
+        else:
+            self._log("{} ... FAILED  (see Script Editor)".format(label))
 
     # --- Progress Bar ---
 
@@ -2285,13 +2702,24 @@ class MultiExportUI(object):
                 "Alembic export enabled but no Camera or Geo Node assigned."
             )
 
-        for role_name, value in [("Camera", camera), ("Geo Node", geo_root)]:
+        for role_name, value in [("Camera", camera), ("Geo Group", geo_root)]:
             if value and not cmds.objExists(value):
                 errors.append(
                     "{} '{}' no longer exists in the scene.".format(
                         role_name, value
                     )
                 )
+
+        # Name-collision checks
+        assigned = []
+        if camera:
+            assigned.append(("Camera", camera))
+        if geo_root:
+            assigned.append(("Geo Group", geo_root))
+        self._check_name_collisions(errors, assigned)
+
+        if do_jsx and geo_root and cmds.objExists(geo_root):
+            self._check_obj_name_collisions(errors, geo_root, camera)
 
         return errors, warnings
 
@@ -2332,11 +2760,11 @@ class MultiExportUI(object):
             suffix = "" if i == 0 else " {}".format(i + 1)
             if r and not cmds.objExists(r):
                 errors.append(
-                    "Rig Node{} '{}' no longer exists in the scene.".format(
+                    "Ctrl Rig Group{} '{}' no longer exists in the scene.".format(
                         suffix, r))
             if g and not cmds.objExists(g):
                 errors.append(
-                    "Anim Geo Node{} '{}' no longer exists in the scene.".format(
+                    "Anim Geo Group{} '{}' no longer exists in the scene.".format(
                         suffix, g))
 
         if do_ma and not any(geo_roots + rig_roots + [camera]):
@@ -2345,10 +2773,10 @@ class MultiExportUI(object):
             )
         if do_fbx and not (geo_roots or rig_roots):
             errors.append(
-                "FBX export enabled but no Anim Geo Node or Rig Node assigned."
+                "FBX export enabled but no Anim Geo Group or Ctrl Rig Group assigned."
             )
         if do_abc and not geo_roots:
-            errors.append("Alembic export enabled but no Anim Geo Node assigned.")
+            errors.append("Alembic export enabled but no Anim Geo Group assigned.")
 
         for role_name, value in [
             ("Camera", camera),
@@ -2361,32 +2789,125 @@ class MultiExportUI(object):
                     )
                 )
 
+        # Name-collision checks
+        assigned = []
+        if camera:
+            assigned.append(("Camera", camera))
+        if proxy_geo:
+            assigned.append(("Static Geo", proxy_geo))
+        for i, pair in enumerate(self.mm_rig_geo_pairs):
+            r = cmds.textFieldButtonGrp(
+                pair["rig_field"], query=True, text=True
+            ).strip()
+            g = cmds.textFieldButtonGrp(
+                pair["geo_field"], query=True, text=True
+            ).strip()
+            suffix = "" if i == 0 else " {}".format(i + 1)
+            if r:
+                assigned.append(("Ctrl Rig Group{}".format(suffix), r))
+            if g:
+                assigned.append(("Anim Geo Group{}".format(suffix), g))
+        self._check_name_collisions(errors, assigned)
+
         return errors, warnings
+
+    # --- Name-collision helpers ---
+
+    @staticmethod
+    def _check_name_collisions(errors, assigned_nodes):
+        """Detect duplicate picks and cam_main rename conflicts.
+
+        Args:
+            errors: List to append error strings to.
+            assigned_nodes: List of (role_label, node_name) tuples.
+        """
+        # Duplicate picks — same node in two or more role fields.
+        seen = {}
+        for role, node in assigned_nodes:
+            if node in seen:
+                errors.append(
+                    "Name collision: '{}' is assigned to both {} and {}.".format(
+                        node, seen[node], role
+                    )
+                )
+            else:
+                seen[node] = role
+
+        # cam_main conflict — a different node already has that name.
+        cameras = [n for r, n in assigned_nodes if "camera" in r.lower()]
+        for cam in cameras:
+            if cam != "cam_main" and cmds.objExists("cam_main"):
+                errors.append(
+                    "Name collision: A node named 'cam_main' already exists. "
+                    "The camera will be renamed to 'cam_main' during export, "
+                    "which would conflict."
+                )
+                break
+
+    @staticmethod
+    def _check_obj_name_collisions(errors, geo_root, camera):
+        """Detect duplicate short names among geo children (OBJ export).
+
+        Args:
+            errors: List to append error strings to.
+            geo_root: Top-level geo group node.
+            camera: Camera node name (excluded from children).
+        """
+        children = cmds.listRelatives(
+            geo_root, children=True, type="transform"
+        ) or []
+        if not children:
+            return
+
+        # Apply same filters used during export.
+        if camera:
+            children = [
+                c for c in children
+                if not Exporter._is_descendant_of(camera, c)
+            ]
+        children = [
+            c for c in children
+            if "chisels" not in c.lower()
+            and "nulls" not in c.lower()
+        ]
+
+        # Check for duplicate short names.
+        name_count = {}
+        for c in children:
+            short = c.rsplit("|", 1)[-1].rsplit(":", 1)[-1]
+            name_count.setdefault(short, []).append(c)
+        for short, nodes in name_count.items():
+            if len(nodes) > 1:
+                errors.append(
+                    "Name collision: Multiple geo children share the "
+                    "name '{}'. OBJ files would overwrite each other. "
+                    "Please rename them to be unique.".format(short)
+                )
 
     # --- Export Orchestration ---
 
     def _on_export(self, *args):
         """Main export callback — dispatches to active tab's export."""
+        self._refresh_scene_info()
         cmds.scrollField(self.log_field, edit=True, text="")
 
         active_tab = self._get_active_tab()
         if active_tab == TAB_CAMERA_TRACK:
-            self._log("Starting Camera Track export...")
             self._export_camera_track()
         else:
-            self._log("Starting Matchmove export...")
             self._export_matchmove()
 
     def _export_camera_track(self):
         """Export pipeline for Camera Track tab."""
         errors, warnings = self._validate_camera_track()
         if errors:
+            for e in errors:
+                self._log(e)
             cmds.confirmDialog(
                 title="Export Errors",
                 message="\n\n".join(errors),
                 button=["OK"],
             )
-            self._log("Export aborted due to errors.")
             return
 
         if warnings:
@@ -2435,8 +2956,6 @@ class MultiExportUI(object):
             version_str = "v01"
         scene_base = VersionParser.get_scene_base_name(scene_short)
 
-        self._log("Scene: {} | Version: {}".format(scene_base, version_str))
-
         # Resolve versioned directories (rename older version folders)
         FolderManager.resolve_versioned_dir(
             export_root, scene_base, version_str
@@ -2446,6 +2965,8 @@ class MultiExportUI(object):
             "{}_track_{}".format(scene_base, version_str),
         )
         FolderManager.resolve_ae_dir(main_dir, scene_base, version_str)
+
+        self._log("Export to: {}".format(main_dir))
 
         exporter = Exporter(self._log)
         results = {}
@@ -2476,7 +2997,6 @@ class MultiExportUI(object):
 
             # JSX + OBJ export
             if do_jsx:
-                self._log("Exporting After Effects JSX + OBJ...")
                 geo_children = []
                 if geo_root:
                     children = cmds.listRelatives(
@@ -2510,11 +3030,10 @@ class MultiExportUI(object):
                     ae_paths["jsx"], ae_paths["obj"], camera, geo_root,
                     start_frame, end_frame
                 )
+                self._log_result("JSX + OBJ", results["jsx"])
                 self._advance_progress()  # step 2: JSX scrub complete
 
-            # MA export
             if do_ma:
-                self._log("Exporting Maya ASCII...")
                 paths = FolderManager.build_export_paths(
                     export_root, scene_base, version_str
                 )
@@ -2524,11 +3043,10 @@ class MultiExportUI(object):
                 results["ma"] = exporter.export_ma(
                     paths["ma"], camera, geo_roots_list, [], None
                 )
+                self._log_result("MA", results["ma"])
                 self._advance_progress()
 
-            # FBX export (camera + geo, no rig/proxy for camera track)
             if do_fbx:
-                self._log("Exporting FBX...")
                 paths = FolderManager.build_export_paths(
                     export_root, scene_base, version_str
                 )
@@ -2539,11 +3057,10 @@ class MultiExportUI(object):
                     paths["fbx"], camera, geo_roots_list, [], None,
                     start_frame, end_frame
                 )
+                self._log_result("FBX", results["fbx"])
                 self._advance_progress()
 
-            # ABC export (camera + geo, no proxy for camera track)
             if do_abc:
-                self._log("Exporting Alembic cache...")
                 paths = FolderManager.build_export_paths(
                     export_root, scene_base, version_str
                 )
@@ -2554,19 +3071,20 @@ class MultiExportUI(object):
                     paths["abc"], camera, geo_roots_list, None,
                     start_frame, end_frame
                 )
+                self._log_result("ABC", results["abc"])
                 self._advance_progress()
 
-            # QC Playblast
             if do_mov:
-                self._log("Exporting QC playblast...")
                 paths = FolderManager.build_export_paths(
                     export_root, scene_base, version_str
                 )
                 FolderManager.ensure_directories({"mov": paths["mov"]})
                 all_paths["mov"] = paths["mov"]
                 results["mov"] = exporter.export_playblast(
-                    paths["mov"], camera, start_frame, end_frame
+                    paths["mov"], camera, start_frame, end_frame,
+                    camera_track_mode=True
                 )
+                self._log_result("QC Playblast", results["mov"])
                 self._advance_progress()
         finally:
             # Restore original camera name
@@ -2579,12 +3097,13 @@ class MultiExportUI(object):
         """Export pipeline for Matchmove tab (identical to v1.0 behavior)."""
         errors, warnings = self._validate_matchmove()
         if errors:
+            for e in errors:
+                self._log(e)
             cmds.confirmDialog(
                 title="Export Errors",
                 message="\n\n".join(errors),
                 button=["OK"],
             )
-            self._log("Export aborted due to errors.")
             return
 
         if warnings:
@@ -2636,6 +3155,15 @@ class MultiExportUI(object):
             self.end_frame_field, query=True, value=True
         )
 
+        # Enforce T-pose start frame for FBX and ABC exports.
+        # The QC playblast uses the original timeline range (no T-pose).
+        playblast_start = start_frame
+        if cmds.checkBox(self.tpose_checkbox, query=True, value=True):
+            tpose_frame = cmds.intField(
+                self.tpose_frame_field, query=True, value=True
+            )
+            start_frame = min(start_frame, tpose_frame)
+
         # Parse version
         scene_short = cmds.file(
             query=True, sceneName=True, shortName=True
@@ -2645,8 +3173,6 @@ class MultiExportUI(object):
             version_str = "v01"
         scene_base = VersionParser.get_scene_base_name(scene_short)
 
-        self._log("Scene: {} | Version: {}".format(scene_base, version_str))
-
         # Resolve versioned directories (rename older version folders)
         FolderManager.resolve_versioned_dir(
             export_root, scene_base, version_str
@@ -2654,10 +3180,12 @@ class MultiExportUI(object):
 
         # Build paths and create directories
         paths = FolderManager.build_export_paths(
-            export_root, scene_base, version_str
+            export_root, scene_base, version_str, tag="charMM"
         )
         FolderManager.ensure_directories(paths)
-        self._log("Folder structure created.")
+
+        dir_path = os.path.dirname(paths.get("ma", paths.get("fbx", "")))
+        self._log("Export to: {}".format(dir_path))
 
         exporter = Exporter(self._log)
         results = {}
@@ -2683,34 +3211,43 @@ class MultiExportUI(object):
                     camera = None
 
             if do_ma:
-                self._log("Exporting Maya ASCII...")
                 results["ma"] = exporter.export_ma(
                     paths["ma"], camera, geo_roots, rig_roots, proxy_geo
                 )
+                self._log_result("MA", results["ma"])
                 self._advance_progress()
 
             if do_fbx:
-                self._log("Exporting FBX (baking keyframes)...")
                 results["fbx"] = exporter.export_fbx(
                     paths["fbx"], camera, geo_roots, rig_roots, proxy_geo,
                     start_frame, end_frame
                 )
+                self._log_result("FBX", results["fbx"])
                 self._advance_progress()
 
             if do_abc:
-                self._log("Exporting Alembic cache...")
                 results["abc"] = exporter.export_abc(
                     paths["abc"], camera, geo_roots, proxy_geo,
                     start_frame, end_frame
                 )
+                self._log_result("ABC", results["abc"])
                 self._advance_progress()
 
             if do_mov:
-                self._log("Exporting QC playblast...")
+                chk_scale = cmds.intSliderGrp(
+                    self.mm_checker_scale, query=True, value=True)
+                chk_color = tuple(cmds.colorSliderGrp(
+                    self.mm_checker_color, query=True, rgbValue=True))
+                chk_opacity = cmds.intSliderGrp(
+                    self.mm_checker_opacity, query=True, value=True)
                 results["mov"] = exporter.export_playblast(
-                    paths["mov"], camera, start_frame, end_frame,
-                    hide_rig_elements=True
+                    paths["mov"], camera, playblast_start, end_frame,
+                    matchmove_geo=geo_roots,
+                    checker_scale=chk_scale,
+                    checker_color=chk_color,
+                    checker_opacity=chk_opacity,
                 )
+                self._log_result("QC Playblast", results["mov"])
                 self._advance_progress()
         finally:
             # Restore original camera name
@@ -2720,13 +3257,8 @@ class MultiExportUI(object):
         self._finish_export(results, paths, original_sel)
 
     def _finish_export(self, results, paths, original_sel):
-        """Log summary, restore selection, show completion dialog."""
+        """Restore selection and show completion dialog."""
         self._hide_progress()
-        self._log("--- Export Complete ---")
-        for fmt, success in results.items():
-            status = "OK" if success else "FAILED"
-            path = paths.get(fmt, "")
-            self._log("  {}: {} -> {}".format(fmt.upper(), status, path))
 
         if original_sel:
             cmds.select(original_sel, replace=True)
@@ -2735,14 +3267,16 @@ class MultiExportUI(object):
 
         failed = [k for k, v in results.items() if not v]
         if failed:
+            self._log("Export finished with errors.")
             cmds.confirmDialog(
                 title="Export Complete (with errors)",
-                message="Some exports failed: {}\nSee the log for details.".format(
+                message="Some exports failed: {}\nSee Script Editor for details.".format(
                     ", ".join(f.upper() for f in failed)
                 ),
                 button=["OK"],
             )
         else:
+            self._log("Export complete.")
             cmds.confirmDialog(
                 title="Export Complete",
                 message="All exports completed successfully!",
