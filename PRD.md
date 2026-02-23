@@ -4,9 +4,10 @@
 
 A Maya 2025+ addon that lets artists export their scene to multiple formats in a single operation, with automatic folder structure creation and versioning. Installed via drag-and-drop of a single `.py` file.
 
-The tool serves two distinct user groups via a tabbed interface:
+The tool serves three distinct user groups via a tabbed interface:
 1. **Camera trackers** — simple scenes from SynthEyes with a tracked camera and reference geo. Export to After Effects (.jsx + .obj), Maya ASCII, FBX, Alembic, and QC playblast.
 2. **Matchmove/animation artists** — complex scenes with character rigs, vertex animation, and static geo. Export to Maya ASCII, FBX, Alembic, and QC playblast.
+3. **Face track artists** — scenes with Alembic-cached facial animation (vertex deformation and/or rigid transforms). Converts Alembic caches to blendshape-based FBX for delivery alongside Maya ASCII and QC playblast.
 
 ## Problem Statement
 
@@ -17,6 +18,7 @@ Artists in the studio need to export each scene they work on to multiple formats
 - Remembering which objects to include/exclude per format
 - Maintaining consistent versioning across formats
 - Manually writing After Effects JSX scripts and exporting OBJ files for camera track handoff
+- Converting Alembic-cached facial animation to blendshape FBX — a multi-step manual process involving duplicate meshes, blendShape node creation, per-frame weight keying, and careful cleanup
 
 ## Target Users
 
@@ -32,6 +34,12 @@ Artists in the studio need to export each scene they work on to multiple formats
 - Never exporting to After Effects
 - Need .ma, .fbx, .abc exports with baked animation
 
+### Face Track Artists (Tab 3 — "Face Track Export")
+- Artists working with Alembic-cached facial animation (e.g. from face tracking software or animation caches)
+- Scenes contain meshes driven by AlembicNode connections — some with vertex-level deformation (blend shapes), some with rigid whole-transform animation
+- Need to deliver FBX files with blendshape-based facial animation for downstream tools (game engines, real-time renderers)
+- The Alembic-to-blendshape conversion is complex and error-prone when done manually
+
 ### Platform
 - Windows and macOS
 - Maya 2025+
@@ -46,47 +54,68 @@ Artists in the studio need to export each scene they work on to multiple formats
 - **Module cache clearing**: On each install, deletes stale `.pyc` files from `__pycache__/` and purges the module from `sys.modules` before re-importing, ensuring the latest version always loads
 - **Shelf button reload**: The shelf button command also clears `sys.modules` before importing, so launching the tool always runs the installed version
 
-### UI — Two-Tab Layout (cmds.tabLayout)
+### UI — Three-Tab Layout (cmds.tabLayout)
 
-Shared elements stay outside the tabs; only role assignments and format checkboxes go inside tabs.
+Shared elements stay outside the tabs; only role assignments, format checkboxes, and viewport settings go inside tabs.
 
 ```
-window "Maya Multi-Export v1.3.0"
+window "Maya Multi-Export v2.0"
 +-- columnLayout (main)
 |   +-- frameLayout "Scene Info"              <-- SHARED (auto-refreshes on save/open)
 |   +-- frameLayout "Export Root Directory"    <-- SHARED
 |   +-- tabLayout
 |   |   +-- "Camera Track Export"             <-- TAB 1
-|   |   |   +-- Node Picker (In the outliner > choose parent nodes)
+|   |   |   +-- Node Picker (In the outliner)
 |   |   |   |   +-- Camera       (Load Sel)
 |   |   |   |   +-- Geo Group    (Load Sel)
 |   |   |   +-- Export Formats
-|   |   |       +-- Maya ASCII (.ma)
-|   |   |       +-- After Effects (.jsx + .obj)
-|   |   |       +-- FBX (.fbx)
-|   |   |       +-- Alembic (.abc)
-|   |   |       +-- Playblast QC (.mov)
+|   |   |   |   +-- Maya ASCII (.ma)
+|   |   |   |   +-- After Effects (.jsx + .obj)
+|   |   |   |   +-- FBX (.fbx)
+|   |   |   |   +-- Alembic (.abc)
+|   |   |   |   +-- Playblast QC (.mov)
+|   |   |   +-- Viewport Settings
+|   |   |       +-- Render as Raw (sRGB)
+|   |   |       +-- Use Current Viewport Settings
 |   |   +-- "Matchmove Export"                <-- TAB 2
-|   |       +-- Node Picker (In the outliner > choose parent nodes)
+|   |   |   +-- Node Picker (In the outliner)
+|   |   |   |   +-- Camera           (Load Sel)
+|   |   |   |   +-- Static Geo       (Load Sel)
+|   |   |   |   +-- ---- separator ----
+|   |   |   |   +-- Ctrl Rig Group   (Load Sel)   \
+|   |   |   |   +-- Anim Geo Group   (Load Sel)   / repeatable pair
+|   |   |   |   +-- [+] [-] buttons
+|   |   |   +-- Export Formats
+|   |   |   |   +-- Maya ASCII (.ma)
+|   |   |   |   +-- FBX (.fbx)
+|   |   |   |   +-- Alembic (.abc)
+|   |   |   |   +-- Playblast QC (.mov)
+|   |   |   +-- Viewport Settings
+|   |   |   |   +-- Render as Raw (sRGB)
+|   |   |   |   +-- Use Current Viewport Settings
+|   |   |   |   +-- QC Checker Overlay (Color, Scale, Opacity)
+|   |   |   +-- checkBox "Include T Pose" + intField (991)
+|   |   +-- "Face Track Export"               <-- TAB 3
+|   |       +-- Node Picker (In the outliner)
 |   |       |   +-- Camera           (Load Sel)
 |   |       |   +-- Static Geo       (Load Sel)
 |   |       |   +-- ---- separator ----
-|   |       |   +-- Ctrl Rig Group   (Load Sel)   \
-|   |       |   +-- Anim Geo Group   (Load Sel)   / repeatable pair
-|   |       |   +-- [+] [-] buttons
+|   |       |   +-- Face Mesh Group  (Load Sel)   repeatable (+/- buttons)
 |   |       +-- Export Formats
-|   |           +-- Maya ASCII (.ma)
-|   |           +-- FBX (.fbx)
-|   |           +-- Alembic (.abc)
-|   |           +-- Playblast QC (.mov)
-|   |           +-- checkBox "Include T Pose" + intField (991)
+|   |       |   +-- Maya ASCII (.ma)
+|   |       |   +-- FBX (.fbx)
+|   |       |   +-- Playblast QC (.mov)
+|   |       +-- Viewport Settings
+|   |           +-- Render as Raw (sRGB)
+|   |           +-- Use Current Viewport Settings
+|   |           +-- QC Checker Overlay (Color, Scale, Opacity)
 |   +-- frameLayout "Frame Range"             <-- SHARED
 |   |   +-- Start / End fields
 |   |   +-- "Use Timeline Range" button
 |   +-- progressBar + label                   <-- SHARED
 |   +-- button "E X P O R T"                 <-- SHARED
 |   +-- frameLayout "Status"                 <-- SHARED
-|   +-- text "v1.3.0"                        <-- SHARED
+|   +-- text "v2.0"                          <-- SHARED
 ```
 
 #### Shared UI Elements
@@ -98,19 +127,37 @@ window "Maya Multi-Export v1.3.0"
 - **Status Panel**: Scrollable text area showing export progress and results. Shows "Export to: {path}" at start, then one-line status per format ("MA ... done" or "MA ... FAILED (see Script Editor)"). Validation errors are also logged here before appearing in the popup dialog
 
 #### Tab 1 — Camera Track Export
-- **Node Picker**: Two fields (Camera, Geo Group) with "Load Sel" buttons. Frame label includes subtitle "(In the outliner > choose parent nodes)".
+- **Node Picker**: Two fields (Camera, Geo Group) with "Load Sel" buttons. Frame label includes subtitle "(In the outliner)".
   - User selects object(s) in viewport, clicks the corresponding "Load Sel" button
   - Tool validates the object type (camera shape, transform)
 - **Export Formats**: Checkboxes for Maya ASCII (.ma), After Effects (.jsx + .obj), FBX (.fbx), Alembic (.abc), Playblast QC (.mov)
+- **Viewport Settings**: Collapsible section with:
+  - **Render as Raw (sRGB)**: Checkbox (on by default). Forces the View Transform to "Raw" for the playblast, giving sRGB passthrough without tonemapping.
+  - **Use Current Viewport Settings**: Checkbox (off by default). Skips all VP2.0 overrides — the playblast uses the user's own viewport state as-is (only the camera is switched to cam_main).
 
 #### Tab 2 — Matchmove Export
-- **Node Picker**: Camera and Static Geo are scene-level fields. Below a separator, Ctrl Rig Group / Anim Geo Group pairs can be added dynamically for multiple characters or vertex-animated meshes. Frame label includes subtitle "(In the outliner > choose parent nodes)".
+- **Node Picker**: Camera and Static Geo are scene-level fields. Below a separator, Ctrl Rig Group / Anim Geo Group pairs can be added dynamically for multiple characters or vertex-animated meshes. Frame label includes subtitle "(In the outliner)".
   - **Camera** and **Static Geo**: Single fields with "Load Sel" buttons (same as before)
   - **Rig/Geo pairs**: Each pair has a Ctrl Rig Group and Anim Geo Group field with "Load Sel" buttons. The first pair is always shown. A `[+]` button adds additional pairs (labeled "Ctrl Rig Group 2" / "Anim Geo Group 2", etc.). A `[-]` button appears when 2+ pairs exist to remove the last pair. The UI grows/shrinks vertically as pairs are added/removed.
   - For vertex-animated meshes (blend shapes, cached deformation), assign as Anim Geo Group with Ctrl Rig Group left empty
   - Tool validates the object type (camera shape, transform)
 - **Export Formats**: Checkboxes for Maya ASCII (.ma), FBX (.fbx), Alembic (.abc), Playblast QC (.mov)
   - **Include T Pose**: Checkbox (checked by default) with an editable frame number field (default 991). When checked and "Use Timeline Range" is clicked, the start frame is set to the T-pose frame value, ensuring the T-pose frame is included in FBX and ABC exports. The QC playblast always uses the original timeline range (no T-pose). Only visible/active on the Matchmove tab.
+- **Viewport Settings**: Collapsible section with:
+  - **Render as Raw (sRGB)**: Checkbox (on by default)
+  - **Use Current Viewport Settings**: Checkbox (off by default)
+  - **QC Checker Overlay**: Color picker, Scale slider (1–32), Opacity slider (0–100)
+
+#### Tab 3 — Face Track Export
+- **Node Picker**: Camera and Static Geo are scene-level fields. Below a separator, Face Mesh Group entries can be added dynamically for multiple face geometry groups (e.g. multiple characters). Frame label includes subtitle "(In the outliner)".
+  - **Camera** and **Static Geo**: Single fields with "Load Sel" buttons
+  - **Face Mesh Groups**: Each entry has a single Face Mesh Group field with "Load Sel" button. The first entry is always shown. A `[+]` button adds additional entries. A `[-]` button appears when 2+ entries exist to remove the last. The UI grows/shrinks vertically as entries are added/removed.
+  - Each Face Mesh Group should be a top-level transform containing one or more Alembic-cached meshes (vertex-deformed and/or rigidly transformed)
+- **Export Formats**: Checkboxes for Maya ASCII (.ma), FBX (.fbx), Playblast QC (.mov)
+- **Viewport Settings**: Collapsible section with:
+  - **Render as Raw (sRGB)**: Checkbox (on by default)
+  - **Use Current Viewport Settings**: Checkbox (off by default)
+  - **QC Checker Overlay**: Color picker, Scale slider (1–32), Opacity slider (0–100)
 
 ### Versioning & Scene Name Parsing
 - Parse version from Maya filename using `_v##` pattern (e.g., `shot_v01.ma`)
@@ -150,19 +197,21 @@ Version-aware folder naming with an After Effects subfolder for Camera Track out
 - **MA**: Image plane transform nodes are added to the export selection so the footage reference is preserved in the `.ma` file. Silently skipped if no image plane is found.
 - If the path is incorrect or unavailable, the feature skips silently — no errors or warnings
 
-#### Camera Rename (all formats, both tabs)
+#### Camera Rename (all formats, all tabs)
 - Camera is temporarily renamed to `cam_main` before any exports begin, then restored after all exports complete
 - Rename happens once at the orchestration level (not per-format)
 
-#### Maya ASCII (.ma) — Both tabs
+#### Maya ASCII (.ma) — All tabs
 - **Tab 1**: Exports Camera + Geo Root
 - **Tab 2**: Exports Camera + Geo Root + Rig Root + Static Geo
+- **Tab 3**: Exports Camera + Face Mesh Groups + Static Geo
 - No baking or special processing
 - Uses `cmds.file(exportSelected=True, type="mayaAscii")`
 
-#### FBX (.fbx) — Both tabs
+#### FBX (.fbx) — All tabs
 - **Tab 1**: Exports Camera + Geo Root
 - **Tab 2**: Exports Camera + Geo Root + Rig Root + Static Geo
+- **Tab 3**: Exports Camera + converted blendshape meshes + Static Geo (see "Alembic-to-Blendshape Conversion" below)
 - **Animation baking**: Handled by the FBX plugin's built-in `FBXExportBakeComplexAnimation` setting, which bakes internally during export without modifying the source scene. No pre-bake or undo chunk needed.
 - FBX export settings overridden via MEL commands:
   - Bake complex animation: on (plugin-internal baking)
@@ -170,7 +219,7 @@ Version-aware folder naming with an After Effects subfolder for Camera Track out
   - Constraints: off
   - Cameras: on
   - Lights: off
-  - Input connections: off
+  - Input connections: off by default, **on for Face Track exports** (required for blendshape weight animation — see below)
   - Embedded textures: off
   - Skins/Shapes: on
   - Smoothing groups: on
@@ -178,12 +227,72 @@ Version-aware folder naming with an After Effects subfolder for Camera Track out
   - Binary format, FBX 2020 compatibility
 - Uses `mel.eval("FBXExport -f ... -s")` for fine-grained control
 
-#### Alembic (.abc) — Both tabs
+##### FBXExportInputConnections — Critical for Blendshape Animation
+
+The `FBXExportInputConnections` MEL flag controls whether the FBX plugin follows input connections from selected nodes during export. When set to `false` (the default for Tabs 1 and 2), the FBX plugin only exports the selected nodes and their direct attributes.
+
+For Face Track exports, this **must** be set to `true`. The reason: the FBX plugin needs to follow the connection chain from the selected mesh → blendShape deformer node → weight animation curves. Without input connections enabled, `FBXExportShapes` exports the blendshape target topology/deltas, but the **animation on the weights** is lost — resulting in an FBX with static blendshape targets and no facial animation.
+
+The `export_input_connections` parameter on `export_fbx()` is set to `True` only for Face Track FBX calls.
+
+#### Alembic (.abc) — Tabs 1 and 2
 - **Tab 1**: Exports Camera + Geo Root
 - **Tab 2**: Exports Camera + Geo Root + Static Geo
 - Animation is baked implicitly by Alembic's frame-range sampling (no explicit `bakeResults`)
 - Flags: `-uvWrite`, `-worldSpace`, `-wholeFrameGeo`, `-dataFormat ogawa`
 - Uses `cmds.AbcExport(j=job_string)` with `-root` flag per assigned role
+
+#### Alembic-to-Blendshape Conversion (Tab 3 — Face Track)
+
+This is the core technical pipeline for the Face Track tab. Alembic caches store per-vertex positions at each frame, but FBX requires blendshape-based animation for facial deformation. The tool automatically converts between these representations.
+
+##### Animation Type Detection
+
+Each mesh under a Face Mesh Group is classified as either **vertex-animated** (facial deformation) or **transform-animated** (rigid body motion). The detection works by:
+
+1. Sampling vertex positions at the **start frame** and **end frame** in local space
+2. If any vertex has moved between those frames → vertex animation (blendshape conversion needed)
+3. If no vertices moved → check for driven transforms (AlembicNode connections to translate/rotate/scale channels) → transform animation (bake keyframes only)
+
+Using start and end frames (rather than consecutive frames) ensures detection catches animation across the full range, even for meshes that are static for most of the shot but animate briefly.
+
+##### Two-Pass Blendshape Conversion
+
+For each vertex-animated mesh, the conversion follows a two-pass approach:
+
+**Pass 1 — Create blendshape targets:**
+1. Create a clean base mesh (duplicate of the source at the first frame)
+2. For each frame in the range, scrub the timeline, duplicate the deformed mesh, and add it as a blendshape target
+3. Targets are added to the blendShape node via `cmds.blendShape(edit=True, target=...)`
+4. A unique name is generated for each target to avoid naming collisions
+
+**Pass 2 — Key all weights by index:**
+1. For each target, key the corresponding `weight[i]` attribute with a step-key pattern:
+   - Frame before: value 0.0
+   - Current frame: value 1.0
+   - Frame after: value 0.0
+   - Step tangents to ensure sharp transitions (no interpolation between shapes)
+2. Weights are keyed by **index** (`weight[0]`, `weight[1]`, etc.) rather than alias names. This is critical because `cmds.aliasAttr` can return aliases in a different order than creation order, and `_unique_name()` may append numbers that collide with frame numbers. Index-based keying guarantees correct weight-to-target mapping.
+
+**Cleanup after keying:**
+1. Delete the target shapes group (blendShape stores deltas internally after `cmds.blendShape(edit=True, target=...)`, so the full mesh copies are no longer needed). This significantly reduces FBX file size — for a 270-frame shot, this removes 270 full mesh duplicates.
+2. Delete the original Alembic-driven source mesh. With `FBXExportInputConnections` enabled, the FBX plugin would otherwise discover and include the original mesh (via its AlembicNode connections), causing a visible "glitch" where a second copy of the geometry pops in and out.
+
+##### Driven Transform Baking
+
+For transform-animated meshes (rigid body motion from AlembicNode), the tool:
+
+1. Bakes translate/rotate/scale channels using `cmds.bakeResults()` over the frame range
+2. **Explicitly disconnects non-animCurve connections** after baking. This is critical because `cmds.bakeResults` creates animCurve nodes but does not necessarily disconnect the original AlembicNode connections. With `FBXExportInputConnections=true`, the FBX plugin would discover these surviving AlembicNode connections and apply them alongside the baked curves, causing timing conflicts and delayed animation.
+
+The disconnection logic iterates over all translate/rotate/scale plugs, checks each source connection, and disconnects anything that is not an `animCurve` node.
+
+##### Namespace and Alias Resolution
+
+Alembic imports can create deeply nested namespace hierarchies. The tool handles this by:
+- Using `cmds.aliasAttr` to resolve blendshape weight aliases when needed
+- Preferring `weight[i]` index-based access over alias names for reliability
+- Handling namespace-qualified node names throughout the pipeline
 
 #### After Effects (.jsx + .obj) — Tab 1 only
 - Generates an ExtendScript JSX file and companion OBJ files for After Effects import
@@ -214,7 +323,7 @@ Version-aware folder naming with an After Effects subfolder for Camera Track out
 - JSX includes helper functions: `findComp`, `firstComp`, `deselectAll`
 - JSX wraps all operations in `app.beginUndoGroup()` / `app.endUndoGroup()`
 
-#### Playblast QC (.mov) — Both tabs
+#### Playblast QC (.mov) — All tabs
 - Renders a viewport playblast through the assigned camera (`cam_main`) at **1920x1080**
 - QuickTime format with **H.264** compression, quality 70
 - Output filename: `<base>_<version>_qc.mov`
@@ -225,18 +334,36 @@ Version-aware folder naming with an After Effects subfolder for Camera Track out
 - **Selection cleared**: Viewport selection is cleared before the playblast so no highlight appears, restored afterward
 - **Platform-aware format**: Prefers `avfoundation` (macOS native) over `qt` (Windows QuickTime). If neither is available, shows a platform-appropriate popup dialog
 
+##### View Transform (Color Management)
+- The user's View Transform setting (from Preferences > Color Management > View) is saved before any VP2.0 overrides are applied
+- **Render as Raw (sRGB)** (on by default): When enabled, the View Transform is forced to "Raw" for the playblast, giving clean sRGB passthrough without tonemapping. Controlled via `cmds.colorManagementPrefs(edit=True, viewTransformName="Raw")`
+- When disabled, the user's original View Transform is re-asserted before the playblast (in case VP2.0 overrides like `cmds.ogs(reset=True)` silently changed it)
+- The original View Transform is always restored in the finally block
+
+##### Backface Culling (All Playblast Paths)
+- **Full backface culling** (value `3`) is applied to every mesh shape node in the scene before the playblast
+- This applies to all tabs and all playblast modes (Camera Track wireframe, Matchmove/Face Track shaded)
+- Ensures clean rendering in wireframe, shaded, and textured views
+- Original per-mesh culling values are saved and restored afterward
+- Skipped when "Use Current Viewport Settings" is enabled
+
 ##### Camera Track Playblast (Tab 1)
 - **Wireframe display**: `displayAppearance="wireframe"` with smooth wireframe enabled
-- **Anti-aliasing**: Multisampling AA (`multiSampleEnable`, `multiSampleCount=16`)
-- **Backface culling**: Full backface culling on all meshes for cleaner wireframe review, restores original per-mesh culling values afterward
+- **Anti-aliasing**: Multisampling AA (`multiSampleEnable`, `multiSampleCount=8`)
 - **All geo visible**: Ensures polymeshes, NURBS surfaces, and subdiv surfaces are visible
 
 ##### Matchmove Playblast (Tab 2)
 - **Display layers forced visible**: All display layers have both `.visibility` and `.playback` attributes set to `True` before the playblast, ensuring nothing is hidden by layer overrides. Original values are saved and restored afterward.
-- **Isolate select**: Only the assigned Anim Geo Group roots (and their descendants) are shown via `cmds.isolateSelect()`. Hides rigs, proxy geo, locators, and all other scene objects. Restored afterward.
+- **Isolate select**: Only the assigned Anim Geo Group roots (and their descendants) are shown via `cmds.isolateSelect()`. Hides rigs, proxy geo, locators, and all other scene objects. The camera and its image planes are also included so background plates are visible. Restored afterward.
 - **Smooth shaded**: `displayAppearance="smoothShaded"` with `wireframeOnShaded=False`
-- **UV checker overlay**: A temporary shader network (`lambert` + `checker` + `place2dTexture`) is created with muted grey colors (`0.75`/`0.25`), `8x8` repeat, and assigned to all meshes within the isolated geo. `displayTextures` is enabled on the viewport. Original shading engines are saved and restored afterward; temporary `mme_uvChecker_*` nodes are deleted.
+- **Anti-aliasing**: Multisampling AA (`multiSampleEnable`, `multiSampleCount=8`)
+- **Motion blur**: VP2.0 hardware motion blur enabled during playblast
+- **UV checker overlay**: A temporary shader network (`lambert` + `checker` + `place2dTexture`) is created with user-configurable color, scale, and opacity. Assigned to all meshes within the isolated geo via `cmds.hyperShade()`. `displayTextures` is enabled on the viewport. Original shading engines are saved and restored afterward; temporary `mme_uvChecker_*` nodes are deleted.
 - **T-pose excluded**: Uses the original timeline range for the playblast frame range, not the T-pose-adjusted start frame (FBX and ABC exports include the T-pose frame; the playblast does not)
+
+##### Face Track Playblast (Tab 3)
+- Same overrides as Matchmove Playblast (display layers, isolate select, smooth shaded, AA, motion blur, UV checker overlay)
+- Isolates the Face Mesh Group roots instead of Anim Geo Group roots
 
 ### Progress Bar
 - Visual progress bar with percentage label shown during export
@@ -259,6 +386,7 @@ Version-aware folder naming with an After Effects subfolder for Camera Track out
 - QuickTime availability check for playblast (popup if missing)
 - Selection state saved and restored after all exports
 - FBX baking delegated to the FBX plugin's internal baking (no scene modification or undo chunks)
+- Face Track conversion uses an undo chunk so the entire operation can be reverted if something fails
 
 ## Non-Functional Requirements
 
@@ -338,7 +466,7 @@ Then transpose to get column-major `R_ae` for decomposition.
 After Effects applies rotation properties as `Rx * Ry * Rz`. This is the **critical convention** — using `Rz * Ry * Rx` (which is the other common convention) produces angles that look close but are wrong. The correct decomposition from the column-major `R_ae`:
 
 ```
-ry = asin(-R_ae[2][0])         # = asin(-r20)
+ ry = asin(-R_ae[2][0])         # = asin(-r20)
 rx = atan2(-R_ae[2][1], R_ae[2][2])  # = atan2(-r21, r22)
 rz = atan2(R_ae[1][0], R_ae[0][0])   # = atan2(r10, r00)
 ```
@@ -406,7 +534,37 @@ When the JSX output doesn't match a known-working reference (e.g., SynthEyes dir
 5. **If scale is wrong on geometry**: Check whether you're reading local scale (`cmds.getAttr(".scaleX")`) vs world-space scale (matrix column magnitudes). Parent groups contribute scale that local attributes don't capture.
 6. **If rotation differs slightly but consistently**: Check whether you're using the world matrix or local matrix for rotation. Parent group rotations (e.g., SynthEyes Z-up to Y-up conversion groups) should be excluded.
 
-## Out of Scope (v2)
+## Face Track Technical Reference
+
+This section documents the Alembic-to-blendshape conversion pipeline and the critical issues discovered during development.
+
+### Why Blendshape Conversion Is Needed
+
+Alembic caches store per-vertex positions at each frame — this is efficient for playback but incompatible with FBX's animation model. FBX represents facial animation through blendshape weights (scalar values animated over time), where each target shape represents a single frame's deformation. The conversion bridges these two representations.
+
+### The InputConnections Discovery
+
+The single most critical finding in the Face Track pipeline: `FBXExportInputConnections -v false` (the default for Tabs 1 and 2) **prevents the FBX plugin from exporting blendshape weight animation**.
+
+The FBX plugin must follow the connection chain: selected mesh → blendShape deformer → weight attributes → animCurve nodes. With input connections disabled, the plugin sees the blendshape targets (topology/deltas via `FBXExportShapes`) but cannot discover the animation curves that drive the weights. The result is an FBX with correct blendshape targets but zero animation.
+
+Setting `FBXExportInputConnections -v true` fixes this — but introduces secondary issues that required their own fixes (see below).
+
+### Secondary Issues from InputConnections=True
+
+Enabling input connections caused the FBX plugin to discover and include nodes that should not be in the export:
+
+1. **Glitchy double geometry**: The original Alembic-driven source mesh was discovered via its AlembicNode connection. Both the source mesh and the converted blendshape mesh ended up in the FBX, causing a visible "pop" where a second copy of the geometry appeared and disappeared. **Fix**: Delete the source mesh after blendshape conversion.
+
+2. **Driven transform timing conflicts**: For transform-animated meshes, `cmds.bakeResults` creates animCurve nodes but doesn't disconnect the original AlembicNode connections. The FBX plugin discovered both the baked curves and the live AlembicNode, causing conflicting animation (delayed/wrong timing). **Fix**: Explicitly disconnect non-animCurve connections after baking.
+
+3. **Alias naming collisions**: `cmds.aliasAttr` can return weight aliases in a different order than creation order, and `_unique_name()` may generate names that look like frame numbers. **Fix**: Key weights by `weight[i]` index instead of alias names — guaranteed creation order.
+
+### FBX File Size Optimization
+
+After keying, the blendShape node stores deltas internally. The full mesh copies used as targets during creation are no longer needed. Deleting the targets group removes N full mesh duplicates from the FBX file (e.g., 270 targets = 270 mesh copies removed).
+
+## Out of Scope (future)
 - Batch export of multiple scenes
 - Custom FBX/Alembic settings UI
 - USD export support
