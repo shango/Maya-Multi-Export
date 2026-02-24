@@ -1,6 +1,6 @@
 """
-maya_multi_export.py  v2.1
-Maya Multi-Export Tool — Export scenes to .ma, .fbx, .abc with auto versioning.
+maya_multi_export.py  v4.0
+Export Genie — Export scenes to .ma, .fbx, .abc with auto versioning.
 
 Drag and drop this file into Maya's viewport to install.
 Compatible with Maya 2025+.
@@ -22,9 +22,9 @@ import maya.mel as mel
 # Constants
 # ---------------------------------------------------------------------------
 TOOL_NAME = "maya_multi_export"
-TOOL_VERSION = "2.1"
+TOOL_VERSION = "4.0"
 WINDOW_NAME = "multiExportWindow"
-SHELF_BUTTON_LABEL = "MultiExport"
+SHELF_BUTTON_LABEL = "Export_Genie"
 ICON_FILENAME = "maya_multi_export.png"
 
 # Tab identifiers
@@ -35,7 +35,7 @@ TAB_FACE_TRACK = "face_track"
 
 # Base64-encoded 32x32 RGBA PNG icon (purple-to-cyan gradient with export arrow and badge)
 ICON_DATA = (
-    "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"
+    "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"
 )
 
 # Module-level UI instance
@@ -1084,7 +1084,10 @@ class Exporter(object):
                          camera_track_mode=False, matchmove_geo=None,
                          checker_scale=8, checker_color=None,
                          checker_opacity=70, raw_playblast=False,
-                         render_raw_srgb=True):
+                         render_raw_srgb=True,
+                         wireframe_shader=False,
+                         wireframe_shader_geo=None,
+                         msaa_16=False):
         """Export a QC playblast as H.264 .mov via QuickTime at 1920x1080.
 
         Args:
@@ -1097,6 +1100,11 @@ class Exporter(object):
             raw_playblast: If True, skips ALL viewport modifications.
                 The playblast uses the user's current VP2.0 settings
                 — only the camera is switched to cam_main.
+            wireframe_shader: If True, applies a useBackground shader
+                to all meshes under wireframe_shader_geo and sets the
+                viewport to wireframe-on-shaded mode.
+            wireframe_shader_geo: Geo root transform whose descendant
+                meshes receive the useBackground shader.
         """
         matchmove_geo = [
             g for g in (matchmove_geo or []) if g and cmds.objExists(g)
@@ -1148,6 +1156,8 @@ class Exporter(object):
                 cmds.lookThru(model_panel, camera)
 
             # Disable 2D pan/zoom — animation aid, not for QC renders.
+            # Extend far clipping plane so distant geometry is visible.
+            original_far_clip = None
             if camera:
                 cam_shapes = cmds.listRelatives(
                     camera, shapes=True, type="camera") or []
@@ -1159,17 +1169,66 @@ class Exporter(object):
                             cam_shapes[0] + ".panZoomEnabled", False)
                     except Exception:
                         pass
+                    try:
+                        original_far_clip = cmds.getAttr(
+                            cam_shapes[0] + ".farClipPlane")
+                        cmds.setAttr(
+                            cam_shapes[0] + ".farClipPlane",
+                            original_far_clip * 10)
+                    except Exception:
+                        pass
+
+            # Hide the grid for all QC renders.
+            original_grid = None
+            if model_panel:
+                try:
+                    original_grid = cmds.modelEditor(
+                        model_panel, query=True, grid=True)
+                    cmds.modelEditor(
+                        model_panel, edit=True, grid=False)
+                except Exception:
+                    pass
 
             # Clear selection so no highlight appears in the playblast
             original_sel = cmds.ls(selection=True)
             cmds.select(clear=True)
 
-            # Preserve the user's View Transform (color management)
-            # so VP2.0 overrides (e.g. cmds.ogs reset) cannot alter it.
+            # Preserve the user's color management settings.
+            # In OCIO v2 (Maya 2022+), the colour transform is
+            # determined by a (display, view) pair — the Preferences
+            # View dropdown maps to the viewName flag, NOT
+            # viewTransformName.  Both must be saved and restored.
+            original_view_name = None
             original_view_transform = None
+            original_pb_ote = None
+            original_pb_ovt = None
+            original_pb_otn = None
+            try:
+                original_view_name = cmds.colorManagementPrefs(
+                    query=True, viewName=True)
+            except Exception:
+                pass
             try:
                 original_view_transform = cmds.colorManagementPrefs(
                     query=True, viewTransformName=True)
+            except Exception:
+                pass
+            try:
+                original_pb_ote = cmds.colorManagementPrefs(
+                    query=True, outputTransformEnabled=True,
+                    outputTarget="playblast")
+            except Exception:
+                pass
+            try:
+                original_pb_ovt = cmds.colorManagementPrefs(
+                    query=True, outputUseViewTransform=True,
+                    outputTarget="playblast")
+            except Exception:
+                pass
+            try:
+                original_pb_otn = cmds.colorManagementPrefs(
+                    query=True, outputTransformName=True,
+                    outputTarget="playblast")
             except Exception:
                 pass
 
@@ -1179,17 +1238,85 @@ class Exporter(object):
             original_msaa_count = None
             original_smooth_wire = None
             original_editor_vis = {}
+            original_ct_wos = None
+            original_ct_shading = {}
+            ct_bg_shader_nodes = []
 
             if camera_track_mode and model_panel and not raw_playblast:
-                # Wireframe display
-                original_display = cmds.modelEditor(
-                    model_panel, query=True, displayAppearance=True
-                )
-                if original_display != "wireframe":
+                if wireframe_shader and wireframe_shader_geo:
+                    # Wireframe-on-shaded with useBackground shader:
+                    # meshes become transparent (showing the camera
+                    # plate) with wireframe edges drawn on top.
+                    original_display = cmds.modelEditor(
+                        model_panel, query=True,
+                        displayAppearance=True)
                     cmds.modelEditor(
                         model_panel, edit=True,
-                        displayAppearance="wireframe",
-                    )
+                        displayAppearance="smoothShaded")
+                    original_ct_wos = cmds.modelEditor(
+                        model_panel, query=True,
+                        wireframeOnShaded=True)
+                    cmds.modelEditor(
+                        model_panel, edit=True,
+                        wireframeOnShaded=True)
+
+                    # Create useBackground shader
+                    bg_shader = cmds.shadingNode(
+                        "useBackground", asShader=True,
+                        name="mme_ctBgShader_mtl")
+                    ct_bg_shader_nodes.append(bg_shader)
+                    bg_sg = cmds.sets(
+                        renderable=True, noSurfaceShader=True,
+                        empty=True, name="mme_ctBgShader_SG")
+                    ct_bg_shader_nodes.append(bg_sg)
+                    cmds.connectAttr(
+                        "{}.outColor".format(bg_shader),
+                        "{}.surfaceShader".format(bg_sg),
+                        force=True)
+
+                    # Collect meshes and save original shading
+                    ct_meshes = []
+                    geo_node = wireframe_shader_geo
+                    if geo_node and cmds.objExists(geo_node):
+                        descendants = cmds.listRelatives(
+                            geo_node, allDescendents=True,
+                            type="mesh", fullPath=True) or []
+                        for m in descendants:
+                            try:
+                                if not cmds.getAttr(
+                                        m + ".intermediateObject"):
+                                    ct_meshes.append(m)
+                            except Exception:
+                                pass
+                    ct_transforms = list(set(
+                        cmds.listRelatives(
+                            ct_meshes, parent=True,
+                            fullPath=True) or []
+                    )) if ct_meshes else []
+
+                    for mesh in ct_meshes:
+                        try:
+                            sgs = cmds.listConnections(
+                                mesh, type="shadingEngine") or []
+                            if sgs:
+                                original_ct_shading[mesh] = sgs[0]
+                        except Exception:
+                            pass
+
+                    # Assign useBackground shader
+                    if ct_transforms:
+                        cmds.select(ct_transforms, replace=True)
+                        cmds.hyperShade(assign=bg_shader)
+                        cmds.select(clear=True)
+                else:
+                    # Default camera track mode: pure wireframe display
+                    original_display = cmds.modelEditor(
+                        model_panel, query=True,
+                        displayAppearance=True)
+                    if original_display != "wireframe":
+                        cmds.modelEditor(
+                            model_panel, edit=True,
+                            displayAppearance="wireframe")
 
                 # Anti-aliasing
                 try:
@@ -1203,7 +1330,8 @@ class Exporter(object):
                     original_msaa_count = cmds.getAttr(
                         "hardwareRenderingGlobals.multiSampleCount")
                     cmds.setAttr(
-                        "hardwareRenderingGlobals.multiSampleCount", 8)
+                        "hardwareRenderingGlobals.multiSampleCount",
+                        16 if msaa_16 else 8)
                 except Exception:
                     pass
                 try:
@@ -1327,7 +1455,8 @@ class Exporter(object):
                     original_mm_msaa_count = cmds.getAttr(
                         "hardwareRenderingGlobals.multiSampleCount")
                     cmds.setAttr(
-                        "hardwareRenderingGlobals.multiSampleCount", 8)
+                        "hardwareRenderingGlobals.multiSampleCount",
+                        16 if msaa_16 else 8)
                 except Exception:
                     pass
                 try:
@@ -1512,21 +1641,44 @@ class Exporter(object):
                 if model_panel:
                     cmds.setFocus(model_panel)
 
-                # Set the View Transform for the playblast.
-                # render_raw_srgb forces "Raw" (sRGB passthrough);
-                # otherwise re-assert the user's original setting in
-                # case VP2.0 overrides (e.g. cmds.ogs reset) changed it.
-                try:
-                    if render_raw_srgb:
+                # Set colour management for the playblast.
+                # In OCIO v2 the (display, view) pair controls the
+                # colour transform.  The Preferences "View" dropdown
+                # is the viewName flag.  We set both viewName and the
+                # legacy viewTransformName so this works across Maya
+                # versions and OCIO configs.  We also configure the
+                # playblast output transform and call refresh so the
+                # change is picked up before the playblast begins.
+                if render_raw_srgb:
+                    try:
+                        cmds.colorManagementPrefs(
+                            edit=True, viewName="Raw")
+                    except Exception:
+                        pass
+                    try:
+                        cmds.colorManagementPrefs(
+                            edit=True, viewTransformName="Raw")
+                    except Exception:
+                        pass
+                    try:
                         cmds.colorManagementPrefs(
                             edit=True,
-                            viewTransformName="Raw")
-                    elif original_view_transform:
+                            outputTransformEnabled=True,
+                            outputTarget="playblast")
+                    except Exception:
+                        pass
+                    try:
                         cmds.colorManagementPrefs(
                             edit=True,
-                            viewTransformName=original_view_transform)
-                except Exception:
-                    pass
+                            outputTransformName="Raw",
+                            outputTarget="playblast")
+                    except Exception:
+                        pass
+                    try:
+                        cmds.colorManagementPrefs(refresh=True)
+                    except Exception:
+                        pass
+                    cmds.refresh(force=True)
 
                 # Strip .mov — playblast appends extension automatically
                 path_no_ext = file_path
@@ -1579,11 +1731,34 @@ class Exporter(object):
                             smoothWireframe=original_smooth_wire)
                     except Exception:
                         pass
-                if original_display and original_display != "wireframe":
-                    cmds.modelEditor(
-                        model_panel, edit=True,
-                        displayAppearance=original_display,
-                    )
+                if original_display is not None and model_panel:
+                    try:
+                        cmds.modelEditor(
+                            model_panel, edit=True,
+                            displayAppearance=original_display)
+                    except Exception:
+                        pass
+                if original_ct_wos is not None and model_panel:
+                    try:
+                        cmds.modelEditor(
+                            model_panel, edit=True,
+                            wireframeOnShaded=original_ct_wos)
+                    except Exception:
+                        pass
+                # Restore useBackground shader assignments
+                for mesh, sg in original_ct_shading.items():
+                    try:
+                        if cmds.objExists(mesh) and cmds.objExists(sg):
+                            cmds.sets(mesh, edit=True,
+                                      forceElement=sg)
+                    except Exception:
+                        pass
+                for node in ct_bg_shader_nodes:
+                    try:
+                        if cmds.objExists(node):
+                            cmds.delete(node)
+                    except Exception:
+                        pass
 
                 # --- Restore Matchmove overrides ---
                 # Restore shading before deleting checker nodes
@@ -1700,16 +1875,32 @@ class Exporter(object):
                             cmds.setAttr(mesh + ".backfaceCulling", val)
                     except Exception:
                         pass
-                if original_pan_zoom is not None and camera:
+                if (original_pan_zoom is not None
+                        or original_far_clip is not None) and camera:
                     cam_shapes = cmds.listRelatives(
                         camera, shapes=True, type="camera") or []
                     if cam_shapes:
-                        try:
-                            cmds.setAttr(
-                                cam_shapes[0] + ".panZoomEnabled",
-                                original_pan_zoom)
-                        except Exception:
-                            pass
+                        if original_pan_zoom is not None:
+                            try:
+                                cmds.setAttr(
+                                    cam_shapes[0] + ".panZoomEnabled",
+                                    original_pan_zoom)
+                            except Exception:
+                                pass
+                        if original_far_clip is not None:
+                            try:
+                                cmds.setAttr(
+                                    cam_shapes[0] + ".farClipPlane",
+                                    original_far_clip)
+                            except Exception:
+                                pass
+                if original_grid is not None and model_panel:
+                    try:
+                        cmds.modelEditor(
+                            model_panel, edit=True,
+                            grid=original_grid)
+                    except Exception:
+                        pass
                 if original_cam and model_panel:
                     cmds.lookThru(model_panel, original_cam)
                 if original_sel:
@@ -1717,14 +1908,50 @@ class Exporter(object):
                         cmds.select(original_sel, replace=True)
                     except Exception:
                         pass
-                # Restore View Transform (color management)
-                if original_view_transform:
+                # Restore color management settings
+                if original_view_name is not None:
+                    try:
+                        cmds.colorManagementPrefs(
+                            edit=True,
+                            viewName=original_view_name)
+                    except Exception:
+                        pass
+                if original_view_transform is not None:
                     try:
                         cmds.colorManagementPrefs(
                             edit=True,
                             viewTransformName=original_view_transform)
                     except Exception:
                         pass
+                # Restore playblast output transform
+                if original_pb_otn is not None:
+                    try:
+                        cmds.colorManagementPrefs(
+                            edit=True,
+                            outputTransformName=original_pb_otn,
+                            outputTarget="playblast")
+                    except Exception:
+                        pass
+                if original_pb_ovt is not None:
+                    try:
+                        cmds.colorManagementPrefs(
+                            edit=True,
+                            outputUseViewTransform=original_pb_ovt,
+                            outputTarget="playblast")
+                    except Exception:
+                        pass
+                if original_pb_ote is not None:
+                    try:
+                        cmds.colorManagementPrefs(
+                            edit=True,
+                            outputTransformEnabled=original_pb_ote,
+                            outputTarget="playblast")
+                    except Exception:
+                        pass
+                try:
+                    cmds.colorManagementPrefs(refresh=True)
+                except Exception:
+                    pass
         except Exception as e:
             self._log_error("Playblast", e)
             return False
@@ -1770,7 +1997,7 @@ class Exporter(object):
     def _jsx_header(scene_name):
         """Generate JSX file header lines."""
         lines = []
-        lines.append("// Auto-generated JSX from Maya Multi-Export v{}".format(
+        lines.append("// Auto-generated JSX from Export Genie v{}".format(
             TOOL_VERSION))
         lines.append("// Scene: {}".format(scene_name))
         lines.append("// Coordinate system: Maya Y-up converted to AE")
@@ -2465,6 +2692,7 @@ class MultiExportUI(object):
         self.scene_info_text = None
         self.version_text = None
         self.export_root_field = None
+        self.version_field = None
         self.start_frame_field = None
         self.end_frame_field = None
         self.tpose_checkbox = None
@@ -2482,6 +2710,8 @@ class MultiExportUI(object):
         self.ct_mov_checkbox = None
         self.ct_raw_playblast_cb = None
         self.ct_raw_srgb_cb = None
+        self.ct_wireframe_shader_cb = None
+        self.ct_aa16_cb = None
         # Matchmove tab (mm_)
         self.mm_camera_field = None
         self.mm_proxy_geo_field = None
@@ -2499,6 +2729,7 @@ class MultiExportUI(object):
         self.mm_mov_checkbox = None
         self.mm_raw_playblast_cb = None
         self.mm_raw_srgb_cb = None
+        self.mm_aa16_cb = None
 
     def show(self):
         """Build and display the UI window."""
@@ -2507,7 +2738,7 @@ class MultiExportUI(object):
 
         self.window = cmds.window(
             WINDOW_NAME,
-            title="Maya Multi-Export  v{}".format(TOOL_VERSION),
+            title="Export Genie  v{}".format(TOOL_VERSION),
             widthHeight=(440, 480),
             sizeable=True,
         )
@@ -2557,6 +2788,7 @@ class MultiExportUI(object):
             height=40,
             backgroundColor=(0.2, 0.62, 0.35),
             command=partial(self._on_export),
+            annotation="Run the export for all checked formats",
         )
         cmds.separator(height=4, style="none")
 
@@ -2617,7 +2849,7 @@ class MultiExportUI(object):
 
     def _build_export_root(self):
         cmds.frameLayout(
-            label="Export Root Directory",
+            label="Export Directory",
             collapsable=True,
             marginWidth=8,
             marginHeight=6,
@@ -2626,11 +2858,20 @@ class MultiExportUI(object):
             label="Path:",
             buttonLabel="Browse...",
             columnWidth3=(40, 300, 70),
+            annotation="Root directory for all exported files",
         )
         cmds.textFieldButtonGrp(
             self.export_root_field,
             edit=True,
             buttonCommand=partial(self._browse_export_root),
+        )
+        self.version_field = cmds.textFieldGrp(
+            label="Version Num (v##):",
+            text="",
+            columnWidth2=(108, 60),
+            annotation=(
+                "Version number appended to exported file names. "
+                "Pre-populated from the scene filename."),
         )
         cmds.setParent("..")
 
@@ -2652,6 +2893,7 @@ class MultiExportUI(object):
             buttonLabel="<< Load Sel",
             columnWidth3=(70, 260, 80),
             editable=False,
+            annotation="Select the camera to export",
         )
         cmds.textFieldButtonGrp(
             self.ct_camera_field,
@@ -2664,6 +2906,7 @@ class MultiExportUI(object):
             buttonLabel="<< Load Sel",
             columnWidth3=(70, 260, 80),
             editable=False,
+            annotation="Select the top-level geo group to export",
         )
         cmds.textFieldButtonGrp(
             self.ct_geo_root_field,
@@ -2683,19 +2926,24 @@ class MultiExportUI(object):
         )
         cmds.columnLayout(adjustableColumn=True, rowSpacing=2)
         self.ct_ma_checkbox = cmds.checkBox(
-            label="  Maya ASCII (.ma)", value=True
+            label="  Maya ASCII (.ma)", value=True,
+            annotation="Export Maya ASCII scene file",
         )
         self.ct_jsx_checkbox = cmds.checkBox(
-            label="  After Effects (.jsx + .obj)", value=True
+            label="  After Effects (.jsx + .obj)", value=True,
+            annotation="Export After Effects JSX script with OBJ geometry",
         )
         self.ct_fbx_checkbox = cmds.checkBox(
-            label="  FBX (.fbx)", value=True
+            label="  FBX (.fbx)", value=True,
+            annotation="Export FBX with baked animation",
         )
         self.ct_abc_checkbox = cmds.checkBox(
-            label="  Alembic (.abc)", value=True
+            label="  Alembic (.abc)", value=True,
+            annotation="Export Alembic cache",
         )
         self.ct_mov_checkbox = cmds.checkBox(
-            label="  Playblast QC (.mov)", value=True
+            label="  Playblast QC (.mov)", value=True,
+            annotation="Export QC playblast movie",
         )
         cmds.setParent("..")
         cmds.setParent("..")
@@ -2714,6 +2962,20 @@ class MultiExportUI(object):
                 "Sets the View Transform to Raw (sRGB) for the "
                 "playblast render"),
             value=True,
+        )
+        self.ct_wireframe_shader_cb = cmds.checkBox(
+            label="  useBackground Shader + Wireframe",
+            annotation=(
+                "Applies a useBackground shader to all geo with "
+                "wireframe-on-shaded for the playblast"),
+            value=False,
+        )
+        self.ct_aa16_cb = cmds.checkBox(
+            label="  Anti-Aliasing 16x (increased RAM)",
+            annotation=(
+                "Sets VP2.0 MSAA to 16 samples instead of 8. "
+                "Higher quality but requires more GPU memory."),
+            value=False,
         )
         self.ct_raw_playblast_cb = cmds.checkBox(
             label="  Use Current Viewport Settings",
@@ -2747,6 +3009,7 @@ class MultiExportUI(object):
             buttonLabel="<< Load Sel",
             columnWidth3=(70, 260, 80),
             editable=False,
+            annotation="Select the camera to export",
         )
         cmds.textFieldButtonGrp(
             self.mm_camera_field,
@@ -2759,6 +3022,7 @@ class MultiExportUI(object):
             buttonLabel="<< Load Sel",
             columnWidth3=(70, 260, 80),
             editable=False,
+            annotation="Select static/proxy geometry group",
         )
         cmds.textFieldButtonGrp(
             self.mm_proxy_geo_field,
@@ -2792,16 +3056,20 @@ class MultiExportUI(object):
         )
         cmds.columnLayout(adjustableColumn=True, rowSpacing=2)
         self.mm_ma_checkbox = cmds.checkBox(
-            label="  Maya ASCII (.ma)", value=True
+            label="  Maya ASCII (.ma)", value=True,
+            annotation="Export Maya ASCII scene file",
         )
         self.mm_fbx_checkbox = cmds.checkBox(
-            label="  FBX (.fbx)", value=True
+            label="  FBX (.fbx)", value=True,
+            annotation="Export FBX with baked animation",
         )
         self.mm_abc_checkbox = cmds.checkBox(
-            label="  Alembic (.abc)", value=True
+            label="  Alembic (.abc)", value=True,
+            annotation="Export Alembic cache",
         )
         self.mm_mov_checkbox = cmds.checkBox(
-            label="  Playblast QC (.mov)", value=True
+            label="  Playblast QC (.mov)", value=True,
+            annotation="Export QC playblast movie",
         )
         cmds.setParent("..")
         cmds.setParent("..")
@@ -2821,6 +3089,13 @@ class MultiExportUI(object):
                 "playblast render"),
             value=True,
         )
+        self.mm_aa16_cb = cmds.checkBox(
+            label="  Anti-Aliasing 16x (increased RAM)",
+            annotation=(
+                "Sets VP2.0 MSAA to 16 samples instead of 8. "
+                "Higher quality but requires more GPU memory."),
+            value=False,
+        )
         self.mm_raw_playblast_cb = cmds.checkBox(
             label="  Use Current Viewport Settings",
             annotation=(
@@ -2836,6 +3111,7 @@ class MultiExportUI(object):
             label="Color:",
             rgb=(0.7, 0.25, 0.25),
             columnWidth3=(40, 80, 1),
+            annotation="Color of the UV checker overlay",
         )
         cmds.separator(style="none", height=6)
         self.mm_checker_scale = cmds.intSliderGrp(
@@ -2847,6 +3123,7 @@ class MultiExportUI(object):
             fieldMaxValue=32,
             value=15,
             columnWidth3=(40, 50, 1),
+            annotation="Scale of the UV checker pattern",
         )
         cmds.separator(style="none", height=6)
         self.mm_checker_opacity = cmds.intSliderGrp(
@@ -2858,6 +3135,7 @@ class MultiExportUI(object):
             fieldMaxValue=100,
             value=15,
             columnWidth3=(40, 50, 1),
+            annotation="Opacity of the UV checker overlay",
         )
         cmds.setParent("..")
         cmds.setParent("..")
@@ -2874,11 +3152,13 @@ class MultiExportUI(object):
             label="  Include T Pose",
             value=True,
             changeCommand=partial(self._on_tpose_toggled),
+            annotation="Include a T-pose frame before the animation start",
         )
         self.tpose_frame_field = cmds.intField(
             value=991,
             width=55,
             changeCommand=partial(self._on_tpose_frame_changed),
+            annotation="Frame number for the T-pose",
         )
         cmds.text(label="")
         cmds.setParent("..")
@@ -2905,6 +3185,7 @@ class MultiExportUI(object):
             buttonLabel="<< Load Sel",
             columnWidth3=(70, 260, 80),
             editable=False,
+            annotation="Select the camera to export",
         )
         cmds.textFieldButtonGrp(
             self.ft_camera_field,
@@ -2917,6 +3198,7 @@ class MultiExportUI(object):
             buttonLabel="<< Load Sel",
             columnWidth3=(70, 260, 80),
             editable=False,
+            annotation="Select static geometry group",
         )
         cmds.textFieldButtonGrp(
             self.ft_static_geo_field,
@@ -2950,13 +3232,16 @@ class MultiExportUI(object):
         )
         cmds.columnLayout(adjustableColumn=True, rowSpacing=2)
         self.ft_ma_checkbox = cmds.checkBox(
-            label="  Maya ASCII (.ma)", value=True
+            label="  Maya ASCII (.ma)", value=True,
+            annotation="Export Maya ASCII scene file",
         )
         self.ft_fbx_checkbox = cmds.checkBox(
-            label="  FBX (.fbx)", value=True
+            label="  FBX (.fbx)", value=True,
+            annotation="Export FBX with baked blendshape animation",
         )
         self.ft_mov_checkbox = cmds.checkBox(
-            label="  Playblast QC (.mov)", value=True
+            label="  Playblast QC (.mov)", value=True,
+            annotation="Export QC playblast movie",
         )
         cmds.setParent("..")
         cmds.setParent("..")
@@ -2976,6 +3261,13 @@ class MultiExportUI(object):
                 "playblast render"),
             value=True,
         )
+        self.ft_aa16_cb = cmds.checkBox(
+            label="  Anti-Aliasing 16x (increased RAM)",
+            annotation=(
+                "Sets VP2.0 MSAA to 16 samples instead of 8. "
+                "Higher quality but requires more GPU memory."),
+            value=False,
+        )
         self.ft_raw_playblast_cb = cmds.checkBox(
             label="  Use Current Viewport Settings",
             annotation=(
@@ -2991,6 +3283,7 @@ class MultiExportUI(object):
             label="Color:",
             rgb=(0.7, 0.25, 0.25),
             columnWidth3=(40, 80, 1),
+            annotation="Color of the UV checker overlay",
         )
         cmds.separator(style="none", height=6)
         self.ft_checker_scale = cmds.intSliderGrp(
@@ -3002,6 +3295,7 @@ class MultiExportUI(object):
             fieldMaxValue=32,
             value=15,
             columnWidth3=(40, 50, 1),
+            annotation="Scale of the UV checker pattern",
         )
         cmds.separator(style="none", height=6)
         self.ft_checker_opacity = cmds.intSliderGrp(
@@ -3013,6 +3307,7 @@ class MultiExportUI(object):
             fieldMaxValue=100,
             value=15,
             columnWidth3=(40, 50, 1),
+            annotation="Opacity of the UV checker overlay",
         )
         cmds.setParent("..")
         cmds.setParent("..")
@@ -3034,14 +3329,15 @@ class MultiExportUI(object):
             columnAlign5=("right", "left", "center", "right", "left"),
         )
         cmds.text(label="Start: ")
-        self.start_frame_field = cmds.intField(value=1, width=65)
+        self.start_frame_field = cmds.intField(value=1, width=65, annotation="First frame of the export range")
         cmds.text(label="")
         cmds.text(label="End: ")
-        self.end_frame_field = cmds.intField(value=100, width=65)
+        self.end_frame_field = cmds.intField(value=100, width=65, annotation="Last frame of the export range")
         cmds.setParent("..")
         cmds.button(
             label="Use Timeline Range",
             command=partial(self._set_timeline_range),
+            annotation="Set start/end frames from the scene timeline",
         )
         cmds.setParent("..")
         cmds.setParent("..")
@@ -3177,11 +3473,13 @@ class MultiExportUI(object):
         self.mm_add_btn = cmds.button(
             label="+", width=26,
             command=partial(self._add_rig_geo_pair),
+            annotation="Add another rig/geo pair",
         )
         self.mm_minus_btn = cmds.button(
             label="-", width=26,
             visible=(len(self.mm_rig_geo_pairs) >= 2),
             command=partial(self._remove_rig_geo_pair),
+            annotation="Remove the last rig/geo pair",
         )
         cmds.setParent("..")  # out of rowLayout
         cmds.setParent("..")  # out of container
@@ -3204,6 +3502,7 @@ class MultiExportUI(object):
             buttonLabel="<< Load Sel",
             columnWidth3=(90, 240, 80),
             editable=False,
+            annotation="Select the control rig group",
         )
         cmds.textFieldButtonGrp(
             rig_field, edit=True,
@@ -3215,6 +3514,7 @@ class MultiExportUI(object):
             buttonLabel="<< Load Sel",
             columnWidth3=(90, 240, 80),
             editable=False,
+            annotation="Select the animated geo group",
         )
         cmds.textFieldButtonGrp(
             geo_field, edit=True,
@@ -3271,11 +3571,13 @@ class MultiExportUI(object):
         self.ft_add_btn = cmds.button(
             label="+", width=26,
             command=partial(self._add_face_mesh_entry),
+            annotation="Add another face mesh entry",
         )
         self.ft_minus_btn = cmds.button(
             label="-", width=26,
             visible=(len(self.ft_face_mesh_entries) >= 2),
             command=partial(self._remove_face_mesh_entry),
+            annotation="Remove the last face mesh entry",
         )
         cmds.setParent("..")  # out of rowLayout
         cmds.setParent("..")  # out of container
@@ -3297,6 +3599,7 @@ class MultiExportUI(object):
             buttonLabel="<< Load Sel",
             columnWidth3=(90, 240, 80),
             editable=False,
+            annotation="Select a face mesh to export",
         )
         cmds.textFieldButtonGrp(
             field, edit=True,
@@ -3331,42 +3634,23 @@ class MultiExportUI(object):
         cmds.window(self.window, edit=True, height=cur_h - 30)
 
     def _set_timeline_range(self, *args):
-        start = cmds.playbackOptions(query=True, minTime=True)
-        end = cmds.playbackOptions(query=True, maxTime=True)
-        # If Include T Pose is checked (matchmove tab only), override start
-        if self._get_active_tab() == TAB_MATCHMOVE:
-            if cmds.checkBox(self.tpose_checkbox, query=True, value=True):
-                tpose_frame = cmds.intField(
-                    self.tpose_frame_field, query=True, value=True
-                )
-                start = min(tpose_frame, start)
+        start = cmds.playbackOptions(query=True, animationStartTime=True)
+        end = cmds.playbackOptions(query=True, animationEndTime=True)
         cmds.intField(self.start_frame_field, edit=True, value=int(start))
         cmds.intField(self.end_frame_field, edit=True, value=int(end))
 
     def _on_tpose_toggled(self, checked, *args):
-        """When Include T Pose is toggled, update the start frame."""
-        if checked:
-            tpose_frame = cmds.intField(
-                self.tpose_frame_field, query=True, value=True
-            )
-            current_start = cmds.intField(
-                self.start_frame_field, query=True, value=True
-            )
-            if tpose_frame < current_start:
-                cmds.intField(
-                    self.start_frame_field, edit=True, value=tpose_frame
-                )
+        """When Include T Pose is toggled (no longer modifies start frame).
+
+        The T-pose frame is handled internally during export — FBX and ABC
+        extend their range to include the T-pose, while .ma and QC playblast
+        keep the original timeline range.
+        """
+        pass
 
     def _on_tpose_frame_changed(self, value, *args):
-        """When the T-pose frame number changes, update start if checked."""
-        if cmds.checkBox(self.tpose_checkbox, query=True, value=True):
-            current_start = cmds.intField(
-                self.start_frame_field, query=True, value=True
-            )
-            if value < current_start:
-                cmds.intField(
-                    self.start_frame_field, edit=True, value=int(value)
-                )
+        """When the T-pose frame number changes (no UI side-effects)."""
+        pass
 
     def _refresh_scene_info(self):
         scene_path = cmds.file(query=True, sceneName=True)
@@ -3386,12 +3670,16 @@ class MultiExportUI(object):
                     edit=True,
                     label="Version: {} (detected)".format(ver_str),
                 )
+                cmds.textFieldGrp(
+                    self.version_field, edit=True, text=ver_str)
             else:
                 cmds.text(
                     self.version_text,
                     edit=True,
                     label="Version: (none detected \u2014 will default to v01)",
                 )
+                cmds.textFieldGrp(
+                    self.version_field, edit=True, text="v01")
         else:
             cmds.text(
                 self.scene_info_text,
@@ -3403,6 +3691,8 @@ class MultiExportUI(object):
                 edit=True,
                 label="Version: (save scene first)",
             )
+            cmds.textFieldGrp(
+                self.version_field, edit=True, text="v01")
 
     def _log(self, message):
         current = cmds.scrollField(self.log_field, query=True, text=True)
@@ -3495,18 +3785,20 @@ class MultiExportUI(object):
         if end_frame <= start_frame:
             errors.append("End frame must be greater than start frame.")
 
-        version_str = None
+        version_str = cmds.textFieldGrp(
+            self.version_field, query=True, text=True).strip()
+        if not version_str:
+            version_str = None
         scene_base = None
         if scene_path:
             scene_short = cmds.file(
                 query=True, sceneName=True, shortName=True
             )
-            version_str, _ = VersionParser.parse(scene_short)
             scene_base = VersionParser.get_scene_base_name(scene_short)
-            if version_str is None:
+            if not version_str:
                 warnings.append(
-                    "No _v## version found in filename '{}'.\n"
-                    "Will default to v01.".format(scene_short)
+                    "Version Num field is empty.\n"
+                    "Will default to v01."
                 )
 
         return (errors, warnings, export_root, version_str, scene_base,
@@ -3804,7 +4096,6 @@ class MultiExportUI(object):
 
     def _on_export(self, *args):
         """Main export callback — dispatches to active tab's export."""
-        self._refresh_scene_info()
         cmds.scrollField(self.log_field, edit=True, text="")
 
         active_tab = self._get_active_tab()
@@ -3865,12 +4156,13 @@ class MultiExportUI(object):
             self.end_frame_field, query=True, value=True
         )
 
-        # Parse version
+        # Read version from UI field
         scene_short = cmds.file(
             query=True, sceneName=True, shortName=True
         )
-        version_str, _ = VersionParser.parse(scene_short)
-        if version_str is None:
+        version_str = cmds.textFieldGrp(
+            self.version_field, query=True, text=True).strip()
+        if not version_str:
             version_str = "v01"
         scene_base = VersionParser.get_scene_base_name(scene_short)
 
@@ -3901,7 +4193,10 @@ class MultiExportUI(object):
         original_cam_name = camera
         try:
             if camera:
-                if cmds.objExists(camera):
+                if camera == "cam_main" and cmds.objExists(camera):
+                    # Already named correctly — no rename needed
+                    pass
+                elif cmds.objExists(camera):
                     renamed_cam = cmds.rename(camera, "cam_main")
                     camera = renamed_cam
                 elif cmds.objExists("cam_main"):
@@ -4003,11 +4298,18 @@ class MultiExportUI(object):
                     self.ct_raw_playblast_cb, query=True, value=True)
                 raw_srgb = cmds.checkBox(
                     self.ct_raw_srgb_cb, query=True, value=True)
+                wf_shader = cmds.checkBox(
+                    self.ct_wireframe_shader_cb, query=True, value=True)
+                aa16 = cmds.checkBox(
+                    self.ct_aa16_cb, query=True, value=True)
                 results["mov"] = exporter.export_playblast(
                     paths["mov"], camera, start_frame, end_frame,
                     camera_track_mode=True,
                     raw_playblast=raw_pb,
                     render_raw_srgb=raw_srgb,
+                    wireframe_shader=wf_shader,
+                    wireframe_shader_geo=geo_root,
+                    msaa_16=aa16,
                 )
                 self._log_result("QC Playblast", results["mov"])
                 self._advance_progress()
@@ -4080,21 +4382,23 @@ class MultiExportUI(object):
             self.end_frame_field, query=True, value=True
         )
 
-        # Enforce T-pose start frame for FBX and ABC exports.
-        # The QC playblast uses the original timeline range (no T-pose).
-        playblast_start = start_frame
+        # T-pose handling: FBX and ABC include T-pose frame in their
+        # range.  The .ma export and QC playblast keep the original
+        # timeline range (T-pose exists outside the range in .ma).
+        tpose_start = start_frame
         if cmds.checkBox(self.tpose_checkbox, query=True, value=True):
             tpose_frame = cmds.intField(
                 self.tpose_frame_field, query=True, value=True
             )
-            start_frame = min(start_frame, tpose_frame)
+            tpose_start = min(start_frame, tpose_frame)
 
-        # Parse version
+        # Read version from UI field
         scene_short = cmds.file(
             query=True, sceneName=True, shortName=True
         )
-        version_str, _ = VersionParser.parse(scene_short)
-        if version_str is None:
+        version_str = cmds.textFieldGrp(
+            self.version_field, query=True, text=True).strip()
+        if not version_str:
             version_str = "v01"
         scene_base = VersionParser.get_scene_base_name(scene_short)
 
@@ -4146,7 +4450,7 @@ class MultiExportUI(object):
             if do_fbx:
                 results["fbx"] = exporter.export_fbx(
                     paths["fbx"], camera, geo_roots, rig_roots, proxy_geo,
-                    start_frame, end_frame
+                    tpose_start, end_frame
                 )
                 self._log_result("FBX", results["fbx"])
                 self._advance_progress()
@@ -4154,7 +4458,7 @@ class MultiExportUI(object):
             if do_abc:
                 results["abc"] = exporter.export_abc(
                     paths["abc"], camera, geo_roots, proxy_geo,
-                    start_frame, end_frame
+                    tpose_start, end_frame
                 )
                 self._log_result("ABC", results["abc"])
                 self._advance_progress()
@@ -4170,14 +4474,17 @@ class MultiExportUI(object):
                     self.mm_checker_color, query=True, rgbValue=True))
                 chk_opacity = cmds.intSliderGrp(
                     self.mm_checker_opacity, query=True, value=True)
+                aa16 = cmds.checkBox(
+                    self.mm_aa16_cb, query=True, value=True)
                 results["mov"] = exporter.export_playblast(
-                    paths["mov"], camera, playblast_start, end_frame,
+                    paths["mov"], camera, start_frame, end_frame,
                     matchmove_geo=geo_roots,
                     checker_scale=chk_scale,
                     checker_color=chk_color,
                     checker_opacity=chk_opacity,
                     raw_playblast=raw_pb,
                     render_raw_srgb=raw_srgb,
+                    msaa_16=aa16,
                 )
                 self._log_result("QC Playblast", results["mov"])
                 self._advance_progress()
@@ -4243,12 +4550,13 @@ class MultiExportUI(object):
             self.end_frame_field, query=True, value=True
         )
 
-        # Parse version
+        # Read version from UI field
         scene_short = cmds.file(
             query=True, sceneName=True, shortName=True
         )
-        version_str, _ = VersionParser.parse(scene_short)
-        if version_str is None:
+        version_str = cmds.textFieldGrp(
+            self.version_field, query=True, text=True).strip()
+        if not version_str:
             version_str = "v01"
         scene_base = VersionParser.get_scene_base_name(scene_short)
 
@@ -4373,6 +4681,8 @@ class MultiExportUI(object):
                     self.ft_checker_color, query=True, rgbValue=True))
                 chk_opacity = cmds.intSliderGrp(
                     self.ft_checker_opacity, query=True, value=True)
+                aa16 = cmds.checkBox(
+                    self.ft_aa16_cb, query=True, value=True)
                 results["mov"] = exporter.export_playblast(
                     paths["mov"], camera, start_frame, end_frame,
                     matchmove_geo=face_meshes,
@@ -4381,6 +4691,7 @@ class MultiExportUI(object):
                     checker_opacity=chk_opacity,
                     raw_playblast=raw_pb,
                     render_raw_srgb=raw_srgb,
+                    msaa_16=aa16,
                 )
                 self._log_result("QC Playblast", results["mov"])
                 self._advance_progress()
@@ -4423,7 +4734,7 @@ class MultiExportUI(object):
 # Entry Points
 # ---------------------------------------------------------------------------
 def launch():
-    """Open the Multi-Export UI. Called by the shelf button."""
+    """Open the Export Genie UI. Called by the shelf button."""
     global _ui_instance
     _ui_instance = MultiExportUI()
     _ui_instance.show()
@@ -4487,7 +4798,7 @@ def _create_shelf_button():
     cmds.shelfButton(
         parent=current_shelf,
         label=SHELF_BUTTON_LABEL,
-        annotation="Maya Multi-Export: Export to .ma, .fbx, .abc, .jsx",
+        annotation="Export Genie: Export to .ma, .fbx, .abc, .jsx",
         image1=ICON_FILENAME,
         command=(
             "import sys\n"
@@ -4531,7 +4842,7 @@ def install():
     cmds.confirmDialog(
         title="Install Complete",
         message=(
-            "Maya Multi-Export v{} installed!\n\n"
+            "Export Genie v{} installed!\n\n"
             "A shelf button has been added to your current shelf.\n"
             "Click it to open the export tool."
         ).format(mod.TOOL_VERSION),
