@@ -51,6 +51,15 @@ Artists in the studio need to export each scene they work on to multiple formats
 - Automatically copies itself to Maya's user scripts directory
 - Creates a custom shelf button with a distinctive icon (embedded as base64 in the .py)
 - Works on both Windows and macOS
+- **ffmpeg bundling (Windows)**: If a `bin/win/ffmpeg.exe` directory exists next to the source `.py` file at install time, the entire `bin/` folder is automatically copied to the scripts directory alongside the script. This enables the H.264 (.mp4 Win) playblast format. The distribution folder structure is:
+  ```
+  export_genie/
+    maya_multi_export.py    ← drag this into Maya
+    bin/
+      win/
+        ffmpeg.exe
+  ```
+  On .py-only upgrades (no `bin/` folder next to the source), any previously installed `bin/` folder is preserved.
 - **Module cache clearing**: On each install, deletes stale `.pyc` files from `__pycache__/` and purges the module from `sys.modules` before re-importing, ensuring the latest version always loads
 - **Shelf button reload**: The shelf button command also clears `sys.modules` before importing, so launching the tool always runs the installed version
 
@@ -67,31 +76,34 @@ window "Maya Multi-Export v2.0"
 |   |   +-- "Camera Track Export"             <-- TAB 1
 |   |   |   +-- Node Picker (In the outliner)
 |   |   |   |   +-- Camera       (Load Sel)
-|   |   |   |   +-- Geo Group    (Load Sel)
+|   |   |   |   +-- Geo Group    (Load Sel)   repeatable (+/- buttons)
 |   |   |   +-- Export Formats
 |   |   |   |   +-- Maya ASCII (.ma)
 |   |   |   |   +-- After Effects (.jsx + .obj)
 |   |   |   |   +-- FBX (.fbx)
 |   |   |   |   +-- Alembic (.abc)
-|   |   |   |   +-- Playblast QC (.mov)
+|   |   |   |   +-- Playblast QC (.mov / .png / .mp4)
 |   |   |   +-- Viewport Settings
 |   |   |       +-- Render as Raw (sRGB)
+|   |   |       +-- useBackground Shader + Wireframe
+|   |   |       +-- Anti-Aliasing 16x
 |   |   |       +-- Use Current Viewport Settings
 |   |   +-- "Matchmove Export"                <-- TAB 2
 |   |   |   +-- Node Picker (In the outliner)
 |   |   |   |   +-- Camera           (Load Sel)
-|   |   |   |   +-- Static Geo       (Load Sel)
+|   |   |   |   +-- Static Geo       (Load Sel)   repeatable (+/- buttons)
 |   |   |   |   +-- ---- separator ----
-|   |   |   |   +-- Ctrl Rig Group   (Load Sel)   \
-|   |   |   |   +-- Anim Geo Group   (Load Sel)   / repeatable pair
+|   |   |   |   +-- Rig Group        (Load Sel)   \
+|   |   |   |   +-- Mesh Group       (Load Sel)   / repeatable pair
 |   |   |   |   +-- [+] [-] buttons
 |   |   |   +-- Export Formats
 |   |   |   |   +-- Maya ASCII (.ma)
 |   |   |   |   +-- FBX (.fbx)
 |   |   |   |   +-- Alembic (.abc)
-|   |   |   |   +-- Playblast QC (.mov)
+|   |   |   |   +-- Playblast QC (.mov / .png / .mp4)
 |   |   |   +-- Viewport Settings
 |   |   |   |   +-- Render as Raw (sRGB)
+|   |   |   |   +-- Anti-Aliasing 16x
 |   |   |   |   +-- Use Current Viewport Settings
 |   |   |   |   +-- QC Checker Overlay (Color, Scale, Opacity)
 |   |   |   +-- checkBox "Include T Pose" + intField (991)
@@ -104,9 +116,10 @@ window "Maya Multi-Export v2.0"
 |   |       +-- Export Formats
 |   |       |   +-- Maya ASCII (.ma)
 |   |       |   +-- FBX (.fbx)
-|   |       |   +-- Playblast QC (.mov)
+|   |       |   +-- Playblast QC (.mov / .png / .mp4)
 |   |       +-- Viewport Settings
 |   |           +-- Render as Raw (sRGB)
+|   |           +-- Anti-Aliasing 16x
 |   |           +-- Use Current Viewport Settings
 |   |           +-- QC Checker Overlay (Color, Scale, Opacity)
 |   +-- frameLayout "Frame Range"             <-- SHARED
@@ -121,30 +134,36 @@ window "Maya Multi-Export v2.0"
 #### Shared UI Elements
 - **Scene Info**: Displays current scene name, detected version, and status. Auto-refreshes via `cmds.scriptJob` on `SceneOpened`, `SceneSaved`, and `NewSceneOpened` events (jobs parented to window for automatic cleanup)
 - **Export Root**: Directory picker for the base export location
-- **Frame Range**: Start/end frame fields + "Use Timeline Range" button
+- **Frame Range**: Start/end frame fields (start defaults to 1001) + "Use Timeline Range" button (clamps start to minimum 1001). When a camera is loaded via Load Sel, the frame range auto-populates: start is set to 1001 and end is set to the camera's last keyframe (queried from both transform and shape channels)
 - **Progress Bar**: Visual progress indicator with percentage label, advances per export format
 - **Export Button**: Triggers the export pipeline for the active tab
 - **Status Panel**: Scrollable text area showing export progress and results. Shows "Export to: {path}" at start, then one-line status per format ("MA ... done" or "MA ... FAILED (see Script Editor)"). Validation errors are also logged here before appearing in the popup dialog
 
 #### Tab 1 — Camera Track Export
-- **Node Picker**: Two fields (Camera, Geo Group) with "Load Sel" buttons. Frame label includes subtitle "(In the outliner)".
+- **Node Picker**: Camera and Geo Group fields with "Load Sel" buttons. Multiple Geo Groups can be added dynamically with +/- buttons. Frame label includes subtitle "(In the outliner)".
   - User selects object(s) in viewport, clicks the corresponding "Load Sel" button
   - Tool validates the object type (camera shape, transform)
-- **Export Formats**: Checkboxes for Maya ASCII (.ma), After Effects (.jsx + .obj), FBX (.fbx), Alembic (.abc), Playblast QC (.mov)
+- **Export Formats**: Checkboxes for Maya ASCII (.ma), After Effects (.jsx + .obj), FBX (.fbx), Alembic (.abc), Playblast QC (.mov / .png / .mp4)
+  - **Playblast format dropdown**: Choose between H.264 (.mov), PNG image sequence, or H.264 (.mp4 Win). The .mp4 option uses bundled ffmpeg to encode from a temp PNG sequence (Windows only). PNG exports numbered frames into a subfolder.
 - **Viewport Settings**: Collapsible section with:
-  - **Render as Raw (sRGB)**: Checkbox (on by default). Forces the View Transform to "Raw" for the playblast, giving sRGB passthrough without tonemapping.
+  - **Render as Raw (sRGB)**: Checkbox (on by default). Sets the playblast output color transform to "Raw" (dynamically detected from available OCIO views), giving sRGB passthrough without tonemapping. Only the playblast output transform is changed — the main view transform is unaffected.
+  - **useBackground Shader + Wireframe**: Applies a useBackground shader to all geo so meshes become transparent (showing the camera plate) with wireframe edges drawn on top. Original shaders restored after render.
+  - **Anti-Aliasing 16x**: Bumps VP2.0 anti-aliasing from 8 to 16 samples.
   - **Use Current Viewport Settings**: Checkbox (off by default). Skips all VP2.0 overrides — the playblast uses the user's own viewport state as-is (only the camera is switched to cam_main).
 
 #### Tab 2 — Matchmove Export
-- **Node Picker**: Camera and Static Geo are scene-level fields. Below a separator, Ctrl Rig Group / Anim Geo Group pairs can be added dynamically for multiple characters or vertex-animated meshes. Frame label includes subtitle "(In the outliner)".
-  - **Camera** and **Static Geo**: Single fields with "Load Sel" buttons (same as before)
-  - **Rig/Geo pairs**: Each pair has a Ctrl Rig Group and Anim Geo Group field with "Load Sel" buttons. The first pair is always shown. A `[+]` button adds additional pairs (labeled "Ctrl Rig Group 2" / "Anim Geo Group 2", etc.). A `[-]` button appears when 2+ pairs exist to remove the last pair. The UI grows/shrinks vertically as pairs are added/removed.
-  - For vertex-animated meshes (blend shapes, cached deformation), assign as Anim Geo Group with Ctrl Rig Group left empty
+- **Node Picker**: Camera and Static Geo are scene-level fields. Multiple Static Geo entries can be added with +/- buttons. Below a separator, Rig Group / Mesh Group pairs can be added dynamically for multiple characters or vertex-animated meshes. Frame label includes subtitle "(In the outliner)".
+  - **Camera**: Single field with "Load Sel" button
+  - **Static Geo**: Repeatable entries with +/- buttons for multiple static geo groups
+  - **Rig/Geo pairs**: Each pair has a Rig Group and Mesh Group field with "Load Sel" buttons. The first pair is always shown. A `[+]` button adds additional pairs (labeled "Rig Group 2" / "Mesh Group 2", etc.). A `[-]` button appears when 2+ pairs exist to remove the last pair. The UI grows/shrinks vertically as pairs are added/removed.
+  - For vertex-animated meshes (blend shapes, cached deformation), assign as Mesh Group with Rig Group left empty
   - Tool validates the object type (camera shape, transform)
-- **Export Formats**: Checkboxes for Maya ASCII (.ma), FBX (.fbx), Alembic (.abc), Playblast QC (.mov)
+- **Export Formats**: Checkboxes for Maya ASCII (.ma), FBX (.fbx), Alembic (.abc), Playblast QC (.mov / .png / .mp4)
+  - **Playblast format dropdown**: Choose between H.264 (.mov), PNG image sequence, or H.264 (.mp4 Win)
   - **Include T Pose**: Checkbox (checked by default) with an editable frame number field (default 991). When checked and "Use Timeline Range" is clicked, the start frame is set to the T-pose frame value, ensuring the T-pose frame is included in FBX and ABC exports. The QC playblast always uses the original timeline range (no T-pose). Only visible/active on the Matchmove tab.
 - **Viewport Settings**: Collapsible section with:
   - **Render as Raw (sRGB)**: Checkbox (on by default)
+  - **Anti-Aliasing 16x**: Checkbox (off by default)
   - **Use Current Viewport Settings**: Checkbox (off by default)
   - **QC Checker Overlay**: Color picker, Scale slider (1–32), Opacity slider (0–100)
 
@@ -153,9 +172,11 @@ window "Maya Multi-Export v2.0"
   - **Camera** and **Static Geo**: Single fields with "Load Sel" buttons
   - **Face Mesh Groups**: Each entry has a single Face Mesh Group field with "Load Sel" button. The first entry is always shown. A `[+]` button adds additional entries. A `[-]` button appears when 2+ entries exist to remove the last. The UI grows/shrinks vertically as entries are added/removed.
   - Each Face Mesh Group should be a top-level transform containing one or more Alembic-cached meshes (vertex-deformed and/or rigidly transformed)
-- **Export Formats**: Checkboxes for Maya ASCII (.ma), FBX (.fbx), Playblast QC (.mov)
+- **Export Formats**: Checkboxes for Maya ASCII (.ma), FBX (.fbx), Playblast QC (.mov / .png / .mp4)
+  - **Playblast format dropdown**: Choose between H.264 (.mov), PNG image sequence, or H.264 (.mp4 Win)
 - **Viewport Settings**: Collapsible section with:
   - **Render as Raw (sRGB)**: Checkbox (on by default)
+  - **Anti-Aliasing 16x**: Checkbox (off by default)
   - **Use Current Viewport Settings**: Checkbox (off by default)
   - **QC Checker Overlay**: Color picker, Scale slider (1–32), Opacity slider (0–100)
 
@@ -172,18 +193,39 @@ window "Maya Multi-Export v2.0"
 
 ### Folder Structure
 
-Version-aware folder naming with an After Effects subfolder for Camera Track output:
+Version-aware folder naming. All tabs use `_track_` in the folder name. Export files use a tab-specific tag (`cam`, `charMM`, or `KTHead`), while QC playblasts always use `track`:
+
+**Camera Track:**
 ```
 <export_root>/
   <base>_track_<version>/
-    <base>_<version>.ma
-    <base>_<version>.fbx
-    <base>_<version>.abc
-    <base>_<version>_qc.mov
+    <base>_cam_<version>.ma
+    <base>_cam_<version>.fbx
+    <base>_cam_<version>.abc
+    <base>_track_<version>.mov
     <base>_track_afterEffects_<version>/
-      <base>_<version>.jsx
-      <base>_<version>_<geo1>.obj
-      <base>_<version>_<geo2>.obj
+      <base>_ae_<version>.jsx
+      <base>_cam_<version>_<geo1>.obj
+      <base>_cam_<version>_<geo2>.obj
+```
+
+**Matchmove:**
+```
+<export_root>/
+  <base>_track_<version>/
+    <base>_charMM_<version>.ma
+    <base>_charMM_<version>.fbx
+    <base>_charMM_<version>.abc
+    <base>_track_<version>.mov
+```
+
+**Face Track:**
+```
+<export_root>/
+  <base>_track_<version>/
+    <base>_KTHead_<version>.ma
+    <base>_KTHead_<version>.fbx
+    <base>_track_<version>.mov
 ```
 
 - Directories are created automatically if they don't exist
@@ -200,20 +242,23 @@ Version-aware folder naming with an After Effects subfolder for Camera Track out
 #### Camera Rename (all formats, all tabs)
 - Camera is temporarily renamed to `cam_main` before any exports begin, then restored after all exports complete
 - Rename happens once at the orchestration level (not per-format)
+- If the camera lives under a static geo, rig group, or mesh group, it is excluded from the top-level export selection (it comes along as a descendant of its parent group instead)
 
 #### Maya ASCII (.ma) — All tabs
 - **Tab 1**: Exports Camera + Geo Root
-- **Tab 2**: Exports Camera + Geo Root + Rig Root + Static Geo
+- **Tab 2**: Exports Camera + Mesh Groups + Rig Groups + Static Geo
 - **Tab 3**: Exports Camera + Face Mesh Groups + Static Geo
 - No baking or special processing
 - Uses `cmds.file(exportSelected=True, type="mayaAscii")`
 
 #### FBX (.fbx) — All tabs
 - **Tab 1**: Exports Camera + Geo Root
-- **Tab 2**: Exports Camera + Geo Root + Rig Root + Static Geo
+- **Tab 2**: Exports Camera + Mesh Groups + Rig Groups + Static Geo
 - **Tab 3**: Exports Camera + converted blendshape meshes + Static Geo (see "Alembic-to-Blendshape Conversion" below)
 - **Animation baking**: Handled by the FBX plugin's built-in `FBXExportBakeComplexAnimation` setting, which bakes internally during export without modifying the source scene. No pre-bake or undo chunk needed.
 - FBX export settings overridden via MEL commands:
+  - **Up axis: Z** — UE5 expects Z-up; the FBX plugin handles Y→Z conversion automatically on export
+  - **Unit conversion: centimeters** — explicit `FBXExportConvertUnitString cm` and `FBXExportScaleFactor 1` so UE5 imports at correct scale
   - Bake complex animation: on (plugin-internal baking)
   - Quaternion: resample
   - Constraints: off
@@ -323,22 +368,26 @@ Alembic imports can create deeply nested namespace hierarchies. The tool handles
 - JSX includes helper functions: `findComp`, `firstComp`, `deselectAll`
 - JSX wraps all operations in `app.beginUndoGroup()` / `app.endUndoGroup()`
 
-#### Playblast QC (.mov) — All tabs
+#### Playblast QC (.mov, .png, or .mp4) — All tabs
 - Renders a viewport playblast through the assigned camera (`cam_main`) at **1920x1080**
-- QuickTime format with **H.264** compression, quality 70
-- Output filename: `<base>_<version>_qc.mov`
-- Uses `cmds.playblast()` with `format="qt"`, `compression="H.264"`, `widthHeight=[1920, 1080]`
+- **Format dropdown** with three options:
+  - **H.264 (.mov)** — QuickTime format with compression quality 70. Requires QuickTime on Windows, uses avfoundation on macOS.
+  - **PNG Sequence** — Image sequence with frame-padded filenames into a versioned subfolder.
+  - **H.264 (.mp4 Win)** — Windows only. Playblasts to a temporary PNG sequence, then encodes to H.264 .mp4 using the bundled `ffmpeg.exe`. No QuickTime dependency. Temp PNGs are deleted on success; preserved on failure for debugging. ffmpeg encoding settings: `-c:v libx264 -pix_fmt yuv420p -profile:v high -level 4.2 -preset ultrafast -crf 18 -movflags +faststart`. If ffmpeg is not found, an error dialog shows the expected install path.
+- Output filename: `<base>_<tag>_<version>.mov`, `<base>_<tag>_<version>.mp4`, or `<base>_<tag>_<version>/` (PNG subfolder)
+- Uses `cmds.playblast()` with `widthHeight=[1920, 1080]`
 - Finds a visible model panel for rendering (does not rely on `withFocus` since clicking Export shifts focus)
 - Switches the panel to the assigned camera via `cmds.lookThru()`, restores original camera afterward
+- **HUD hidden**: `showOrnaments=False` suppresses all heads-up display elements
 - **2D Pan/Zoom disabled**: Camera `panZoomEnabled` is temporarily set to `False` during the playblast to prevent pan/zoom overrides from affecting the render
 - **Selection cleared**: Viewport selection is cleared before the playblast so no highlight appears, restored afterward
-- **Platform-aware format**: Prefers `avfoundation` (macOS native) over `qt` (Windows QuickTime). If neither is available, shows a platform-appropriate popup dialog
+- **Platform-aware format** (.mov only): Prefers `avfoundation` (macOS native) over `qt` (Windows QuickTime). If neither is available, shows a platform-appropriate popup dialog
 
 ##### View Transform (Color Management)
-- The user's View Transform setting (from Preferences > Color Management > View) is saved before any VP2.0 overrides are applied
-- **Render as Raw (sRGB)** (on by default): When enabled, the View Transform is forced to "Raw" for the playblast, giving clean sRGB passthrough without tonemapping. Controlled via `cmds.colorManagementPrefs(edit=True, viewTransformName="Raw")`
-- When disabled, the user's original View Transform is re-asserted before the playblast (in case VP2.0 overrides like `cmds.ogs(reset=True)` silently changed it)
-- The original View Transform is always restored in the finally block
+- **Render as Raw (sRGB)** (on by default): When enabled, the playblast output color transform is set to the "Raw" view (dynamically detected from available OCIO views by finding the first view name starting with "Raw"). This gives clean sRGB passthrough without tonemapping.
+- Controlled via `cmds.colorManagementPrefs(edit=True, outputTransformEnabled=True, outputUseViewTransform=True, outputTransformName=<raw_view>, outputTarget="playblast")` — only the playblast output transform is changed; the main viewport view transform is unaffected
+- **Dynamic Raw detection**: Queries `cmds.colorManagementPrefs(query=True, viewNames=True)` and finds the first view starting with "Raw" — handles "Raw", "Raw (Legacy)", and other variants across Maya versions
+- Original playblast output transform settings are saved and restored in the finally block
 
 ##### Backface Culling (All Playblast Paths)
 - **Full backface culling** (value `3`) is applied to every mesh shape node in the scene before the playblast
@@ -354,7 +403,7 @@ Alembic imports can create deeply nested namespace hierarchies. The tool handles
 
 ##### Matchmove Playblast (Tab 2)
 - **Display layers forced visible**: All display layers have both `.visibility` and `.playback` attributes set to `True` before the playblast, ensuring nothing is hidden by layer overrides. Original values are saved and restored afterward.
-- **Isolate select**: Only the assigned Anim Geo Group roots (and their descendants) are shown via `cmds.isolateSelect()`. Hides rigs, proxy geo, locators, and all other scene objects. The camera and its image planes are also included so background plates are visible. Restored afterward.
+- **Isolate select**: Only the assigned Mesh Group roots (and their descendants) are shown via `cmds.isolateSelect()`. Hides rigs, proxy geo, locators, and all other scene objects. The camera and its image planes are also included so background plates are visible. Restored afterward.
 - **Smooth shaded**: `displayAppearance="smoothShaded"` with `wireframeOnShaded=False`
 - **Anti-aliasing**: Multisampling AA (`multiSampleEnable`, `multiSampleCount=8`)
 - **Motion blur**: VP2.0 hardware motion blur enabled during playblast
@@ -363,7 +412,7 @@ Alembic imports can create deeply nested namespace hierarchies. The tool handles
 
 ##### Face Track Playblast (Tab 3)
 - Same overrides as Matchmove Playblast (display layers, isolate select, smooth shaded, AA, motion blur, UV checker overlay)
-- Isolates the Face Mesh Group roots instead of Anim Geo Group roots
+- Isolates the Face Mesh Group roots instead of Mesh Group roots
 
 ### Progress Bar
 - Visual progress bar with percentage label shown during export
@@ -385,7 +434,9 @@ Alembic imports can create deeply nested namespace hierarchies. The tool handles
 - Plugin auto-loading for FBX (`fbxmaya`), Alembic (`AbcExport`), and OBJ (`objExport`)
 - QuickTime availability check for playblast (popup if missing)
 - Selection state saved and restored after all exports
+- **Version number in error dialogs**: All error and warning dialogs include "Export Genie {version}" in the message header for easy troubleshooting
 - FBX baking delegated to the FBX plugin's internal baking (no scene modification or undo chunks)
+- **Matchmove UE5 prep**: Before FBX export, the tool bakes camera animation (translate/rotate/scale) and prepares rigs for Unreal import. Camera baking ensures the camera exports correctly with Z-up axis conversion. The entire prep operation runs in an undo chunk and is reverted after export.
 - Face Track conversion uses an undo chunk so the entire operation can be reverted if something fails
 
 ## Non-Functional Requirements
@@ -394,7 +445,7 @@ Alembic imports can create deeply nested namespace hierarchies. The tool handles
 - **Maya Version**: 2025+ only
 - **UI Framework**: Pure `maya.cmds` (no PySide dependency)
 - **Single file**: All code in one `.py` file for simplicity
-- **No external dependencies**: Only Maya built-in modules
+- **No external dependencies**: Only Maya built-in modules (ffmpeg.exe is an optional bundled binary for the .mp4 playblast format on Windows)
 - **String formatting**: `.format()` style (no f-strings, for broader Maya Python compatibility)
 
 ## JSX Export Technical Reference

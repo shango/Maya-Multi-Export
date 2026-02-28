@@ -1,5 +1,5 @@
 """
-maya_multi_export.py  v4.0
+maya_multi_export.py  v7_beta_4
 Export Genie — Export scenes to .ma, .fbx, .abc with auto versioning.
 
 Drag and drop this file into Maya's viewport to install.
@@ -9,6 +9,7 @@ Compatible with Maya 2025+.
 import math
 import os
 import re
+import subprocess
 import sys
 import shutil
 import base64
@@ -22,7 +23,7 @@ import maya.mel as mel
 # Constants
 # ---------------------------------------------------------------------------
 TOOL_NAME = "maya_multi_export"
-TOOL_VERSION = "4.0"
+TOOL_VERSION = "v7_beta_4"
 WINDOW_NAME = "multiExportWindow"
 SHELF_BUTTON_LABEL = "Export_Genie"
 ICON_FILENAME = "maya_multi_export.png"
@@ -111,15 +112,18 @@ class FolderManager(object):
 
     @staticmethod
     def build_export_paths(export_root, scene_base_name, version_str,
-                           tag="cam"):
+                           tag="track", qc_tag="track"):
         """Build the full set of export paths.
 
         Args:
-            tag: Naming tag inserted between base name and version.
-                 "cam" for Camera Track, "charMM" for Matchmove.
+            tag: Naming tag for export files (ma, fbx, abc).
+                 "cam" for Camera Track, "charMM" for Matchmove,
+                 "KTHead" for Face Track.
+            qc_tag: Naming tag for QC playblast files (mov, png, mp4).
+                    Defaults to "track" for all tabs.
 
         Returns:
-            dict: {"ma": path, "fbx": path, "abc": path, "mov": path}
+            dict: {"ma": path, "fbx": path, "abc": path, "mov": path, ...}
         """
         paths = {}
         dir_name = "{}_track_{}".format(scene_base_name, version_str)
@@ -129,11 +133,20 @@ class FolderManager(object):
                 base=scene_base_name, tag=tag, ver=version_str, ext=ext
             )
             paths[fmt] = os.path.join(dir_path, file_name)
-        # QC playblast
-        qc_name = "{base}_{tag}_qc_{ver}.mov".format(
-            base=scene_base_name, tag=tag, ver=version_str
+        # QC playblast — uses qc_tag (always "track") for consistent naming
+        qc_base = "{base}_{tag}_{ver}".format(
+            base=scene_base_name, tag=qc_tag, ver=version_str
         )
-        paths["mov"] = os.path.join(dir_path, qc_name)
+        paths["mov"] = os.path.join(dir_path, qc_base + ".mov")
+        # PNG sequence: subfolder with same base name
+        png_dir = os.path.join(dir_path, qc_base)
+        paths["png_dir"] = png_dir
+        paths["png_file"] = os.path.join(png_dir, qc_base)
+        # MP4 (ffmpeg) output and temp directory
+        paths["mp4"] = os.path.join(dir_path, qc_base + ".mp4")
+        mp4_tmp_dir = os.path.join(dir_path, "_tmp_mp4")
+        paths["mp4_tmp_dir"] = mp4_tmp_dir
+        paths["mp4_tmp_file"] = os.path.join(mp4_tmp_dir, qc_base)
         return paths
 
     @staticmethod
@@ -272,6 +285,221 @@ class Exporter(object):
                 div=divider, tag=tag.upper(), err=exception, tb=tb_str)
         )
 
+    def _validate_playblast_format(self):
+        """Multi-layer diagnostic for .mov playblast format availability.
+
+        Returns:
+            tuple: (pb_format, diagnostics) where pb_format is
+                   "avfoundation", "qt", or None; diagnostics is a
+                   list of human-readable strings.
+        """
+        diag = []
+
+        # Layer 1: Query Maya for available formats
+        available_formats = cmds.playblast(
+            format=True, query=True
+        ) or []
+
+        pb_format = None
+        if "avfoundation" in available_formats:
+            pb_format = "avfoundation"
+            diag.append("Movie format OK (AVFoundation).")
+        elif "qt" in available_formats:
+            pb_format = "qt"
+            diag.append("Movie format OK (QuickTime).")
+        else:
+            diag.append("No .mov movie format detected by Maya.")
+
+        # Layer 2 & 3: Windows-only registry and DLL checks
+        if sys.platform == "win32":
+            qt_info = self._check_quicktime_windows()
+            if qt_info["registry_found"]:
+                ver = qt_info.get("version_str", "unknown")
+                diag.append(
+                    "QuickTime version {} is installed.".format(ver))
+            else:
+                diag.append("QuickTime is NOT installed on this machine.")
+
+            if qt_info["qts_found"]:
+                diag.append("QuickTime core files found on disk.")
+            elif qt_info["registry_found"]:
+                diag.append(
+                    "QuickTime core files are MISSING from disk "
+                    "(incomplete install).")
+
+        return pb_format, diag
+
+    @staticmethod
+    def _check_quicktime_windows():
+        """Check Windows registry and disk for QuickTime installation.
+
+        Returns dict with keys: registry_found, install_dir,
+        version_str, qts_found, qts_path.
+        """
+        info = {
+            "registry_found": False,
+            "install_dir": None,
+            "version_str": None,
+            "qts_found": False,
+            "qts_path": None,
+        }
+        try:
+            import winreg
+        except ImportError:
+            return info
+
+        # Try multiple registry views (32-bit redirect on 64-bit Windows)
+        for access_flag in (
+            winreg.KEY_READ | winreg.KEY_WOW64_32KEY,
+            winreg.KEY_READ | winreg.KEY_WOW64_64KEY,
+            winreg.KEY_READ,
+        ):
+            try:
+                key = winreg.OpenKey(
+                    winreg.HKEY_LOCAL_MACHINE,
+                    r"SOFTWARE\Apple Computer, Inc.\QuickTime",
+                    0, access_flag,
+                )
+                info["registry_found"] = True
+                try:
+                    install_dir, _ = winreg.QueryValueEx(
+                        key, "InstallDir")
+                    info["install_dir"] = install_dir
+                except (FileNotFoundError, OSError):
+                    pass
+                try:
+                    version_raw, _ = winreg.QueryValueEx(
+                        key, "Version")
+                    major = (version_raw >> 24) & 0xFF
+                    minor = (version_raw >> 20) & 0x0F
+                    patch = (version_raw >> 16) & 0x0F
+                    info["version_str"] = "{}.{}.{}".format(
+                        major, minor, patch)
+                except (FileNotFoundError, OSError):
+                    pass
+                winreg.CloseKey(key)
+                break
+            except (FileNotFoundError, OSError):
+                continue
+
+        # Check for QuickTime.qts on disk
+        search_dirs = []
+        if info["install_dir"]:
+            search_dirs.append(info["install_dir"])
+        search_dirs.extend([
+            r"C:\Program Files (x86)\QuickTime",
+            r"C:\Program Files\QuickTime",
+        ])
+        for candidate in search_dirs:
+            qts = os.path.join(candidate, "QTSystem", "QuickTime.qts")
+            if os.path.isfile(qts):
+                info["qts_found"] = True
+                info["qts_path"] = qts
+                if not info["install_dir"]:
+                    info["install_dir"] = candidate
+                break
+
+        return info
+
+    @staticmethod
+    def _find_ffmpeg():
+        """Locate the bundled ffmpeg executable relative to this script.
+
+        The expected layout after install is::
+
+            {scripts_dir}/maya_multi_export.py
+            {scripts_dir}/bin/win/ffmpeg.exe
+
+        Returns:
+            str or None: Absolute path to ffmpeg.exe if found.
+        """
+        if sys.platform != "win32":
+            return None
+        scripts_dir = os.path.dirname(os.path.abspath(__file__))
+        # If running from __pycache__, go up one level
+        if os.path.basename(scripts_dir) == "__pycache__":
+            scripts_dir = os.path.dirname(scripts_dir)
+        ffmpeg_path = os.path.join(scripts_dir, "bin", "win", "ffmpeg.exe")
+        if os.path.isfile(ffmpeg_path):
+            return ffmpeg_path
+        return None
+
+    def _encode_mp4(self, png_dir, png_base, start_frame, output_mp4):
+        """Encode a PNG image sequence to H.264 .mp4 via bundled ffmpeg.
+
+        Args:
+            png_dir: Directory containing the PNG sequence.
+            png_base: Base filename without frame number or extension.
+            start_frame: First frame number in the sequence.
+            output_mp4: Full path to the output .mp4 file.
+
+        Returns:
+            bool: True if encoding succeeded.
+        """
+        ffmpeg_path = self._find_ffmpeg()
+        if not ffmpeg_path:
+            self.log(
+                "[Playblast] ERROR: ffmpeg.exe not found. "
+                "Expected at: {}".format(
+                    os.path.join(
+                        os.path.dirname(os.path.abspath(__file__)),
+                        "bin", "win", "ffmpeg.exe")))
+            return False
+
+        fps = self._get_fps()
+        seq_pattern = os.path.join(
+            png_dir, "{}.%04d.png".format(png_base))
+
+        cmd = [
+            ffmpeg_path,
+            "-y",
+            "-framerate", str(fps),
+            "-start_number", str(int(start_frame)),
+            "-i", seq_pattern,
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-profile:v", "high",
+            "-level", "4.2",
+            "-preset", "ultrafast",
+            "-crf", "18",
+            "-movflags", "+faststart",
+            output_mp4,
+        ]
+
+        self.log("[Playblast] Encoding MP4 via ffmpeg...")
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=600,
+                creationflags=getattr(
+                    subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if result.returncode != 0:
+                self.log(
+                    "[Playblast] ffmpeg FAILED (exit {}): {}".format(
+                        result.returncode,
+                        result.stderr[-500:] if result.stderr else ""))
+                return False
+            self.log("[Playblast] MP4 encoding complete.")
+            return True
+        except subprocess.TimeoutExpired:
+            self.log("[Playblast] ffmpeg timed out (600s).")
+            return False
+        except Exception as e:
+            self.log("[Playblast] ffmpeg error: {}".format(e))
+            return False
+
+    @staticmethod
+    def _cleanup_temp_pngs(png_dir):
+        """Delete a temporary PNG sequence directory."""
+        if os.path.isdir(png_dir):
+            try:
+                shutil.rmtree(png_dir)
+            except Exception:
+                pass
+
     @staticmethod
     def _is_descendant_of(node, ancestor):
         """Return True if *node* is the same as or a descendant of *ancestor*."""
@@ -285,7 +513,7 @@ class Exporter(object):
         return (node_long[0] == ancestor_long[0]
                 or node_long[0].startswith(ancestor_long[0] + "|"))
 
-    def export_ma(self, file_path, camera, geo_roots, rig_roots, proxy_geo,
+    def export_ma(self, file_path, camera, geo_roots, rig_roots, proxy_geos,
                   start_frame=None, end_frame=None):
         """Export selection as Maya ASCII.
 
@@ -294,6 +522,7 @@ class Exporter(object):
         Args:
             geo_roots: list of geo root transforms (or empty list).
             rig_roots: list of rig root transforms (or empty list).
+            proxy_geos: list of static/proxy geo transforms (or empty list).
             start_frame: If provided, the exported .ma file's playback
                 range is set to this start frame (then restored).
             end_frame: If provided, the exported .ma file's playback
@@ -302,13 +531,18 @@ class Exporter(object):
         try:
             geo_roots = geo_roots or []
             rig_roots = rig_roots or []
-            # Skip camera if it's a descendant of any geo root
-            cam_under_geo = any(
+            proxy_geos = proxy_geos or []
+            # Skip camera from selection if it's already a descendant
+            # of any assigned group — it will be exported as part of
+            # that hierarchy.
+            all_roots = geo_roots + rig_roots + proxy_geos
+            cam_under_root = any(
                 self._is_descendant_of(camera, gr)
-                for gr in geo_roots if gr
+                for gr in all_roots if gr
             )
-            effective_cam = None if cam_under_geo else camera
-            sel = [s for s in [effective_cam, proxy_geo] if s]
+            effective_cam = None if cam_under_root else camera
+            sel = [effective_cam] if effective_cam else []
+            sel.extend(proxy_geos)
             sel.extend(geo_roots)
             sel.extend(rig_roots)
             # Include image plane transforms so the source footage
@@ -390,17 +624,17 @@ class Exporter(object):
             self._log_error("MA", e)
             return False
 
-    def export_fbx(self, file_path, camera, geo_roots, rig_roots, proxy_geo,
-                   start_frame, end_frame, resample_animation=False,
+    def export_fbx(self, file_path, camera, geo_roots, rig_roots, proxy_geos,
+                   start_frame, end_frame,
                    export_input_connections=False):
         """Export camera + geo + rig + proxy geo as FBX with baked keyframes.
+
+        UE5-conforming settings: Resample All ON, Tangents ON, Up Axis Y.
 
         Args:
             geo_roots: list of geo root transforms (or empty list).
             rig_roots: list of rig root transforms (or empty list).
-            resample_animation: If True, forces the FBX exporter to
-                resample ALL animation at every frame. Required for
-                blendshape weight animation to survive FBX roundtrip.
+            proxy_geos: list of static/proxy geo transforms (or empty list).
             export_input_connections: If True, the FBX plugin follows
                 input connections (deformers, anim curves) from the
                 selected nodes.  Required for blendshape weight
@@ -410,6 +644,7 @@ class Exporter(object):
         try:
             geo_roots = geo_roots or []
             rig_roots = rig_roots or []
+            proxy_geos = proxy_geos or []
             # Ensure FBX plugin is loaded
             if not cmds.pluginInfo("fbxmaya", query=True, loaded=True):
                 try:
@@ -419,22 +654,26 @@ class Exporter(object):
                     cmds.confirmDialog(
                         title="FBX Plugin Not Found",
                         message=(
+                            "Export Genie {}\n\n"
                             "The FBX plugin (fbxmaya) could not be loaded.\n\n"
                             "To enable it, go to:\n"
                             "Windows > Settings/Preferences > Plug-in Manager\n\n"
                             "Find 'fbxmaya' in the list and check 'Loaded'."
-                        ),
+                        ).format(TOOL_VERSION),
                         button=["OK"],
                     )
                     return False
 
-            # Skip camera if it's a descendant of any geo root
-            cam_under_geo = any(
+            # Skip camera from selection if it's already a descendant
+            # of any assigned group.
+            all_roots = geo_roots + rig_roots + proxy_geos
+            cam_under_root = any(
                 self._is_descendant_of(camera, gr)
-                for gr in geo_roots if gr
+                for gr in all_roots if gr
             )
-            effective_cam = None if cam_under_geo else camera
-            sel = [s for s in [effective_cam, proxy_geo] if s]
+            effective_cam = None if cam_under_root else camera
+            sel = [effective_cam] if effective_cam else []
+            sel.extend(proxy_geos)
             sel.extend(geo_roots)
             sel.extend(rig_roots)
             if not sel:
@@ -459,13 +698,13 @@ class Exporter(object):
                 "FBXExportBakeComplexEnd -v {}".format(int(end_frame))
             )
             mel.eval("FBXExportBakeComplexStep -v 1")
-            mel.eval("FBXExportBakeResampleAnimation -v {}".format(
-                "true" if resample_animation else "false"))
+            mel.eval("FBXExportBakeResampleAnimation -v true")
             # Deformed Models
             mel.eval("FBXExportSkins -v true")
             mel.eval("FBXExportShapes -v true")
             # General
             mel.eval("FBXExportSmoothingGroups -v true")
+            mel.eval("FBXExportTangents -v true")
             mel.eval("FBXExportSmoothMesh -v false")
             mel.eval("FBXExportConstraints -v false")
             mel.eval("FBXExportCameras -v true")
@@ -473,6 +712,9 @@ class Exporter(object):
             mel.eval("FBXExportSkeletonDefinitions -v true")
             mel.eval("FBXExportInAscii -v false")
             mel.eval('FBXExportFileVersion -v "FBX202000"')
+            mel.eval("FBXExportUpAxis z")
+            mel.eval("FBXExportConvertUnitString cm")
+            mel.eval("FBXExportScaleFactor 1")
             mel.eval("FBXExportUseSceneName -v false")
 
             # Select and export
@@ -485,15 +727,17 @@ class Exporter(object):
             self._log_error("FBX", e)
             return False
 
-    def export_abc(self, file_path, camera, geo_roots, proxy_geo,
+    def export_abc(self, file_path, camera, geo_roots, proxy_geos,
                    start_frame, end_frame):
         """Export camera + geo roots + proxy geo as Alembic cache.
 
         Args:
             geo_roots: list of geo root transforms (or empty list).
+            proxy_geos: list of static/proxy geo transforms (or empty list).
         """
         try:
             geo_roots = geo_roots or []
+            proxy_geos = proxy_geos or []
             # Ensure Alembic plugin is loaded
             if not cmds.pluginInfo("AbcExport", query=True, loaded=True):
                 try:
@@ -503,30 +747,33 @@ class Exporter(object):
                     cmds.confirmDialog(
                         title="Alembic Plugin Not Found",
                         message=(
+                            "Export Genie {}\n\n"
                             "The Alembic plugin (AbcExport) could not be loaded.\n\n"
                             "To enable it, go to:\n"
                             "Windows > Settings/Preferences > Plug-in Manager\n\n"
                             "Find 'AbcExport' in the list and check 'Loaded'."
-                        ),
+                        ).format(TOOL_VERSION),
                         button=["OK"],
                     )
                     return False
 
-            if not camera and not geo_roots and not proxy_geo:
+            if not camera and not geo_roots and not proxy_geos:
                 self.log("[ABC] Nothing to export — no roles assigned.")
                 return False
 
-            # Build root flags
-            cam_under_geo = any(
+            # Build root flags — skip camera if it's already under
+            # any assigned group.
+            all_roots = geo_roots + proxy_geos
+            cam_under_root = any(
                 self._is_descendant_of(camera, gr)
-                for gr in geo_roots if gr
+                for gr in all_roots if gr
             )
             root_flags = ""
-            root_nodes = [camera] + geo_roots + [proxy_geo]
+            root_nodes = [camera] + geo_roots + proxy_geos
             for node in root_nodes:
                 if not node:
                     continue
-                if node == camera and cam_under_geo:
+                if node == camera and cam_under_root:
                     continue
                 long_names = cmds.ls(node, long=True)
                 if not long_names:
@@ -814,28 +1061,22 @@ class Exporter(object):
         self.log("[FaceTrack] Keyed {}/{} blendshape weights on '{}'.".format(
             keyed_count, len(frames), bs_node))
 
-        # --- Cleanup for lean FBX export ---
-        # Delete target shapes and group. The blendShape node stores
-        # deltas internally after targets are added, so the geometry
-        # is no longer needed. Removing them prevents InputConnections
-        # from dragging 270 full mesh copies into the FBX.
-        if cmds.objExists(grp):
-            try:
-                cmds.delete(grp)
-            except Exception:
-                pass
+        # Keep target shapes alive — the FBX plugin follows
+        # InputConnections from base_mesh -> blendShape -> targets.
+        # Without them the exported FBX contains no blendshape data.
+        # The undo chunk in _export_face_track restores the scene
+        # after export.
 
         # Delete original Alembic source mesh — prevents the FBX
         # exporter from including the original (still Alembic-driven)
         # mesh via InputConnections (visual glitching / double geo).
-        # The undo chunk in _export_face_track restores everything.
         if cmds.objExists(src_xform):
             try:
                 cmds.delete(src_xform)
             except Exception:
                 pass
 
-        self.log("[FaceTrack] Cleaned up source + {} target(s).".format(
+        self.log("[FaceTrack] Prepared {} target(s) for FBX export.".format(
             len(frames)))
 
         # Restore original time
@@ -912,6 +1153,231 @@ class Exporter(object):
                     cmds.disconnectAttr(src_plug, plug)
                 except Exception:
                     pass
+
+    def prep_for_ue5_fbx_export(self, geo_roots, rig_roots,
+                                start_frame, end_frame, camera=None):
+        """Prepare a Matchmove scene for UE5-friendly FBX export.
+
+        Performs: bake camera, bake animation to joints, remove
+        constraints, check joint scales, delete non-deformer history,
+        freeze transforms on non-skinned geo, strip namespaces.
+
+        All changes are destructive — caller MUST wrap in an undo chunk.
+        """
+        trs = ["tx", "ty", "tz", "rx", "ry", "rz", "sx", "sy", "sz"]
+
+        # --- Step 0: Bake camera animation ---
+        if camera and cmds.objExists(camera):
+            for a in trs:
+                try:
+                    cmds.setAttr("{}.{}".format(camera, a),
+                                 lock=False, keyable=True,
+                                 channelBox=True)
+                except Exception:
+                    pass
+            cmds.bakeResults(
+                camera,
+                t=(int(start_frame), int(end_frame)),
+                at=trs,
+                simulation=True,
+                preserveOutsideKeys=True,
+                minimizeRotation=True,
+            )
+            self.log("[UE5 Prep] Baked camera animation.")
+
+        # --- Step 1: Bake animation to skeleton joints ---
+        # Must happen first while constraints are still live
+        all_joints = []
+        for root in (rig_roots or []):
+            if cmds.objExists(root):
+                joints = cmds.listRelatives(
+                    root, allDescendents=True, type="joint",
+                    fullPath=True
+                ) or []
+                all_joints.extend(joints)
+                if cmds.objectType(root) == "joint":
+                    all_joints.append(root)
+        # De-duplicate preserving order
+        seen = set()
+        unique_joints = []
+        for j in all_joints:
+            if j not in seen:
+                seen.add(j)
+                unique_joints.append(j)
+        all_joints = unique_joints
+
+        if all_joints:
+            self.log("[UE5 Prep] Baking animation on {} joints...".format(
+                len(all_joints)))
+            # Unlock TRS channels before baking
+            for jnt in all_joints:
+                for a in trs:
+                    try:
+                        cmds.setAttr(
+                            "{}.{}".format(jnt, a),
+                            lock=False, keyable=True, channelBox=True)
+                    except Exception:
+                        pass
+            cmds.bakeResults(
+                all_joints,
+                t=(int(start_frame), int(end_frame)),
+                at=trs,
+                simulation=True,
+                preserveOutsideKeys=True,
+                minimizeRotation=True,
+            )
+
+        # --- Step 2: Remove constraints ---
+        constraint_types = [
+            "parentConstraint", "pointConstraint", "orientConstraint",
+            "aimConstraint", "scaleConstraint", "poleVectorConstraint",
+        ]
+        constraints_removed = 0
+        for root in (rig_roots or []):
+            if not cmds.objExists(root):
+                continue
+            for ctype in constraint_types:
+                constraints = cmds.listRelatives(
+                    root, allDescendents=True, type=ctype,
+                    fullPath=True
+                ) or []
+                for c in constraints:
+                    if cmds.objExists(c):
+                        try:
+                            cmds.delete(c)
+                            constraints_removed += 1
+                        except Exception:
+                            pass
+        if constraints_removed:
+            self.log("[UE5 Prep] Removed {} constraints.".format(
+                constraints_removed))
+
+        # Disconnect non-animCurve sources on baked joints
+        for jnt in all_joints:
+            for a in trs:
+                plug = "{}.{}".format(jnt, a)
+                conns = cmds.listConnections(
+                    plug, source=True, destination=False,
+                    plugs=True, skipConversionNodes=True
+                ) or []
+                for src_plug in conns:
+                    src_node = src_plug.split(".")[0]
+                    if cmds.nodeType(src_node).startswith("animCurve"):
+                        continue
+                    try:
+                        cmds.disconnectAttr(src_plug, plug)
+                    except Exception:
+                        pass
+
+        # --- Step 3: Check joint scale ---
+        for jnt in all_joints:
+            cmds.currentTime(start_frame, edit=True)
+            sx = cmds.getAttr("{}.scaleX".format(jnt))
+            sy = cmds.getAttr("{}.scaleY".format(jnt))
+            sz = cmds.getAttr("{}.scaleZ".format(jnt))
+            if not (abs(sx - 1.0) < 1e-4
+                    and abs(sy - 1.0) < 1e-4
+                    and abs(sz - 1.0) < 1e-4):
+                short = jnt.split("|")[-1].split(":")[-1]
+                self.log(
+                    "[UE5 Prep] WARNING: Joint '{}' has non-unit scale "
+                    "({:.3f}, {:.3f}, {:.3f})".format(short, sx, sy, sz))
+
+        # --- Step 4: Delete non-deformer history on meshes ---
+        all_roots = list(geo_roots or []) + list(rig_roots or [])
+        all_mesh_xforms = []
+        for root in all_roots:
+            if not cmds.objExists(root):
+                continue
+            descendants = cmds.listRelatives(
+                root, allDescendents=True, type="transform",
+                fullPath=True
+            ) or []
+            for desc in [root] + descendants:
+                shapes = cmds.listRelatives(
+                    desc, shapes=True, type="mesh", fullPath=True
+                ) or []
+                if shapes and desc not in all_mesh_xforms:
+                    all_mesh_xforms.append(desc)
+
+        history_deleted = 0
+        for mesh_xform in all_mesh_xforms:
+            try:
+                cmds.bakePartialHistory(
+                    mesh_xform, prePostDeformers=True)
+                history_deleted += 1
+            except Exception:
+                pass
+        if history_deleted:
+            self.log("[UE5 Prep] Deleted non-deformer history on "
+                     "{} meshes.".format(history_deleted))
+
+        # --- Step 5: Freeze transforms on non-skinned non-joint geo ---
+        transforms_frozen = 0
+        for mesh_xform in all_mesh_xforms:
+            # Skip skinned meshes
+            history = cmds.listHistory(
+                mesh_xform, pruneDagObjects=True
+            ) or []
+            has_skin = any(
+                cmds.objectType(h) == "skinCluster" for h in history)
+            if has_skin:
+                continue
+            # Skip transforms with child joints
+            child_joints = cmds.listRelatives(
+                mesh_xform, allDescendents=True, type="joint"
+            ) or []
+            if child_joints:
+                continue
+            try:
+                cmds.makeIdentity(
+                    mesh_xform, apply=True,
+                    translate=True, rotate=True, scale=True, normal=0)
+                transforms_frozen += 1
+            except Exception:
+                pass
+        if transforms_frozen:
+            self.log("[UE5 Prep] Froze transforms on "
+                     "{} meshes.".format(transforms_frozen))
+
+        # --- Step 6: Strip namespaces ---
+        all_ns = cmds.namespaceInfo(
+            listOnlyNamespaces=True, recurse=True
+        ) or []
+        skip_ns = {"UI", "shared"}
+        all_ns = [ns for ns in all_ns if ns not in skip_ns]
+        # Sort longest-first for nested namespaces
+        all_ns.sort(key=len, reverse=True)
+
+        namespaces_stripped = 0
+        for ns in all_ns:
+            try:
+                ns_contents = cmds.namespaceInfo(
+                    ns, listNamespace=True
+                ) or []
+                has_referenced = False
+                for node in ns_contents:
+                    if cmds.objExists(node):
+                        try:
+                            if cmds.referenceQuery(
+                                    node, isNodeReferenced=True):
+                                has_referenced = True
+                                break
+                        except RuntimeError:
+                            pass
+                if has_referenced:
+                    self.log(
+                        "[UE5 Prep] Skipping namespace '{}' "
+                        "(contains referenced nodes)".format(ns))
+                    continue
+                cmds.namespace(
+                    removeNamespace=ns, mergeNamespaceWithRoot=True)
+                namespaces_stripped += 1
+            except Exception:
+                pass
+        if namespaces_stripped:
+            self.log("[UE5 Prep] Stripped {} namespaces.".format(
+                namespaces_stripped))
 
     def prepare_face_track_for_export(self, picked_nodes, start_frame,
                                        end_frame):
@@ -1087,8 +1553,14 @@ class Exporter(object):
                          render_raw_srgb=True,
                          wireframe_shader=False,
                          wireframe_shader_geo=None,
-                         msaa_16=False):
-        """Export a QC playblast as H.264 .mov via QuickTime at 1920x1080.
+                         msaa_16=False,
+                         png_mode=False,
+                         mp4_mode=False,
+                         mp4_output=None):
+        """Export a QC playblast at 1920x1080.
+
+        Supports H.264 .mov (via QuickTime), PNG image sequence, or
+        H.264 .mp4 (via bundled ffmpeg on Windows).
 
         Args:
             camera_track_mode: If True, applies Camera Track viewport
@@ -1103,37 +1575,110 @@ class Exporter(object):
             wireframe_shader: If True, applies a useBackground shader
                 to all meshes under wireframe_shader_geo and sets the
                 viewport to wireframe-on-shaded mode.
-            wireframe_shader_geo: Geo root transform whose descendant
-                meshes receive the useBackground shader.
+            wireframe_shader_geo: List of geo root transforms (or single
+                node) whose descendant meshes receive the useBackground
+                shader.
+            png_mode: If True, exports PNG image sequence instead of
+                H.264 .mov.  Skips QuickTime validation.
+            mp4_mode: If True, playblasts to temp PNG sequence then
+                encodes to H.264 .mp4 via bundled ffmpeg (Windows only).
+            mp4_output: Full path to the output .mp4 file.  Required
+                when mp4_mode is True.
         """
         matchmove_geo = [
             g for g in (matchmove_geo or []) if g and cmds.objExists(g)
         ]
         try:
-            # Check .mov format availability:
-            #   macOS: "avfoundation" (native)
-            #   Windows: "qt" (requires Apple QuickTime Essentials)
-            available_formats = cmds.playblast(
-                format=True, query=True
-            ) or []
-            if "avfoundation" in available_formats:
-                pb_format = "avfoundation"
-            elif "qt" in available_formats:
-                pb_format = "qt"
+            # Validate format availability
+            pb_format = None
+            if mp4_mode:
+                pb_format = "image"
+                if not self._find_ffmpeg():
+                    cmds.confirmDialog(
+                        title="Cannot Create QC Movie",
+                        message=(
+                            "Export Genie {}\n\n"
+                            "ffmpeg.exe was not found.\n\n"
+                            "The H.264 (.mp4 Win) format requires "
+                            "ffmpeg.exe to be installed alongside "
+                            "this script.\n\n"
+                            "How to fix:\n"
+                            "Re-install Export Genie by dragging the "
+                            ".py file (from the folder containing "
+                            "bin/) into Maya's viewport.\n\n"
+                            "Expected location:\n"
+                            "{}".format(
+                                TOOL_VERSION,
+                                os.path.join(
+                                    os.path.dirname(
+                                        os.path.abspath(__file__)),
+                                    "bin", "win", "ffmpeg.exe"))),
+                        button=["OK"],
+                    )
+                    return False
+                self.log(
+                    "[Playblast] Format: H.264 MP4 (via ffmpeg).")
+            elif png_mode:
+                pb_format = "image"
+                self.log("[Playblast] Format: PNG image sequence.")
             else:
-                self.log("[Playblast] No .mov format available.")
-                cmds.confirmDialog(
-                    title="QuickTime Not Found",
-                    message=(
-                        "No .mov playblast format is available.\n\n"
-                        "Windows: Install Apple QuickTime Essentials "
-                        "and restart Maya.\n"
-                        "macOS: AVFoundation should be built-in — "
-                        "check Maya's Plug-in Manager."
-                    ),
-                    button=["OK"],
-                )
-                return False
+                pb_format, diag = self._validate_playblast_format()
+                for d in diag:
+                    self.log("[Playblast] {}".format(d))
+
+                if pb_format is None:
+                    # Build a clear, non-technical message
+                    if sys.platform == "win32":
+                        qt_info = self._check_quicktime_windows()
+                        if not qt_info["registry_found"]:
+                            msg = (
+                                "QuickTime is not installed.\n\n"
+                                "The QC movie export needs Apple QuickTime "
+                                "to create .mov files.\n\n"
+                                "How to fix:\n"
+                                "  1. Download QuickTime 7.7.9 for Windows "
+                                "from apple.com\n"
+                                "  2. Run the installer and make sure "
+                                "'QuickTime Essentials' is checked\n"
+                                "  3. Close and reopen Maya")
+                        elif not qt_info["qts_found"]:
+                            msg = (
+                                "QuickTime is only partially installed.\n\n"
+                                "Maya found a QuickTime entry on this "
+                                "machine, but the core files are missing "
+                                "from disk.\n\n"
+                                "How to fix:\n"
+                                "  1. Uninstall QuickTime from "
+                                "Add/Remove Programs\n"
+                                "  2. Reinstall QuickTime 7.7.9 for "
+                                "Windows\n"
+                                "  3. Close and reopen Maya")
+                        else:
+                            msg = (
+                                "QuickTime is installed, but Maya cannot "
+                                "use it.\n\n"
+                                "The QuickTime files are on disk but Maya "
+                                "does not see the .mov format.\n\n"
+                                "How to fix:\n"
+                                "  1. Close and reopen Maya (this is "
+                                "required after installing QuickTime)\n"
+                                "  2. If that doesn't work, uninstall "
+                                "QuickTime, reinstall it using the "
+                                "'Full' option, and reopen Maya")
+                    else:
+                        msg = (
+                            "No .mov format is available.\n\n"
+                            "AVFoundation should be built-in on macOS. "
+                            "Go to Windows > Settings/Preferences > "
+                            "Plug-in Manager and check that media "
+                            "plugins are loaded.")
+                    cmds.confirmDialog(
+                        title="Cannot Create QC Movie",
+                        message="Export Genie {}\n\n{}".format(
+                            TOOL_VERSION, msg),
+                        button=["OK"],
+                    )
+                    return False
 
             # Find a visible model panel for the playblast.
             model_panel = None
@@ -1276,18 +1821,21 @@ class Exporter(object):
 
                     # Collect meshes and save original shading
                     ct_meshes = []
-                    geo_node = wireframe_shader_geo
-                    if geo_node and cmds.objExists(geo_node):
-                        descendants = cmds.listRelatives(
-                            geo_node, allDescendents=True,
-                            type="mesh", fullPath=True) or []
-                        for m in descendants:
-                            try:
-                                if not cmds.getAttr(
-                                        m + ".intermediateObject"):
-                                    ct_meshes.append(m)
-                            except Exception:
-                                pass
+                    wf_geo_list = wireframe_shader_geo or []
+                    if isinstance(wf_geo_list, str):
+                        wf_geo_list = [wf_geo_list]
+                    for geo_node in wf_geo_list:
+                        if geo_node and cmds.objExists(geo_node):
+                            descendants = cmds.listRelatives(
+                                geo_node, allDescendents=True,
+                                type="mesh", fullPath=True) or []
+                            for m in descendants:
+                                try:
+                                    if not cmds.getAttr(
+                                            m + ".intermediateObject"):
+                                        ct_meshes.append(m)
+                                except Exception:
+                                    pass
                     ct_transforms = list(set(
                         cmds.listRelatives(
                             ct_meshes, parent=True,
@@ -1650,57 +2198,137 @@ class Exporter(object):
                 # playblast output transform and call refresh so the
                 # change is picked up before the playblast begins.
                 if render_raw_srgb:
+                    # Find the Raw view transform name.  OCIO configs
+                    # vary across Maya versions — it may be "Raw",
+                    # "Raw (sRGB)", "Raw (Legacy)", etc.  Query the
+                    # available views and pick the first that starts
+                    # with "Raw".
+                    raw_view_name = None
                     try:
-                        cmds.colorManagementPrefs(
-                            edit=True, viewName="Raw")
+                        available = (
+                            cmds.colorManagementPrefs(
+                                query=True, viewNames=True)
+                            or [])
+                        for v in available:
+                            if v.startswith("Raw"):
+                                raw_view_name = v
+                                break
                     except Exception:
                         pass
-                    try:
-                        cmds.colorManagementPrefs(
-                            edit=True, viewTransformName="Raw")
-                    except Exception:
-                        pass
-                    try:
-                        cmds.colorManagementPrefs(
-                            edit=True,
-                            outputTransformEnabled=True,
-                            outputTarget="playblast")
-                    except Exception:
-                        pass
-                    try:
-                        cmds.colorManagementPrefs(
-                            edit=True,
-                            outputTransformName="Raw",
-                            outputTarget="playblast")
-                    except Exception:
-                        pass
+                    if raw_view_name:
+                        self.log(
+                            "[Playblast] Setting playblast output "
+                            "transform to '{}'".format(raw_view_name))
+                        # Set the playblast output transform to Raw.
+                        # This is the Preferences > Color Management >
+                        # Output Color Transform > Apply Output
+                        # Transform to Playblast setting.
+                        try:
+                            cmds.colorManagementPrefs(
+                                edit=True,
+                                outputTransformEnabled=True,
+                                outputTarget="playblast")
+                        except Exception:
+                            pass
+                        try:
+                            cmds.colorManagementPrefs(
+                                edit=True,
+                                outputUseViewTransform=True,
+                                outputTarget="playblast")
+                        except Exception:
+                            pass
+                        try:
+                            cmds.colorManagementPrefs(
+                                edit=True,
+                                outputTransformName=raw_view_name,
+                                outputTarget="playblast")
+                        except Exception:
+                            pass
+                    else:
+                        self.log(
+                            "[Playblast] No Raw view found in OCIO "
+                            "config — skipping Raw override.")
                     try:
                         cmds.colorManagementPrefs(refresh=True)
                     except Exception:
                         pass
                     cmds.refresh(force=True)
 
-                # Strip .mov — playblast appends extension automatically
-                path_no_ext = file_path
-                if path_no_ext.lower().endswith(".mov"):
-                    path_no_ext = path_no_ext[:-4]
-
-                cmds.playblast(
-                    filename=path_no_ext,
-                    format=pb_format,
-                    compression="H.264",
-                    startTime=start_frame,
-                    endTime=end_frame,
-                    forceOverwrite=True,
-                    sequenceTime=False,
-                    clearCache=True,
-                    viewer=False,
-                    showOrnaments=True,
-                    framePadding=4,
-                    percent=100,
-                    quality=70,
-                    widthHeight=[1920, 1080],
-                )
+                if mp4_mode:
+                    # H.264 MP4 via ffmpeg: playblast temp PNGs, encode
+                    png_dir = os.path.dirname(file_path)
+                    if not os.path.exists(png_dir):
+                        os.makedirs(png_dir)
+                    self.log(
+                        "[Playblast] Writing temp PNG sequence...")
+                    cmds.playblast(
+                        filename=file_path,
+                        format="image",
+                        compression="png",
+                        startTime=start_frame,
+                        endTime=end_frame,
+                        forceOverwrite=True,
+                        sequenceTime=False,
+                        clearCache=True,
+                        viewer=False,
+                        showOrnaments=False,
+                        framePadding=4,
+                        percent=100,
+                        quality=100,
+                        widthHeight=[1920, 1080],
+                    )
+                    png_base = os.path.basename(file_path)
+                    encode_ok = self._encode_mp4(
+                        png_dir, png_base, start_frame, mp4_output)
+                    if encode_ok:
+                        self._cleanup_temp_pngs(png_dir)
+                    else:
+                        self.log(
+                            "[Playblast] Temp PNGs preserved at: "
+                            "{}".format(png_dir))
+                    return encode_ok
+                elif png_mode:
+                    # PNG image sequence
+                    png_dir = os.path.dirname(file_path)
+                    if not os.path.exists(png_dir):
+                        os.makedirs(png_dir)
+                    cmds.playblast(
+                        filename=file_path,
+                        format="image",
+                        compression="png",
+                        startTime=start_frame,
+                        endTime=end_frame,
+                        forceOverwrite=True,
+                        sequenceTime=False,
+                        clearCache=True,
+                        viewer=False,
+                        showOrnaments=False,
+                        framePadding=4,
+                        percent=100,
+                        quality=100,
+                        widthHeight=[1920, 1080],
+                    )
+                else:
+                    # H.264 .mov — strip extension, playblast appends it
+                    path_no_ext = file_path
+                    if path_no_ext.lower().endswith(".mov"):
+                        path_no_ext = path_no_ext[:-4]
+                    cmds.playblast(
+                        filename=path_no_ext,
+                        format=pb_format,
+                        compression="H.264",
+                        startTime=start_frame,
+                        endTime=end_frame,
+                        forceOverwrite=True,
+                        sequenceTime=False,
+                        clearCache=True,
+                        viewer=False,
+                        showOrnaments=False,
+                        framePadding=4,
+                        percent=100,
+                        quality=70,
+                        widthHeight=[1920, 1080],
+                    )
                 return True
             finally:
                 # --- Restore Camera Track overrides ---
@@ -2702,19 +3330,24 @@ class MultiExportUI(object):
         self.progress_label = None
         # Camera Track tab (ct_)
         self.ct_camera_field = None
-        self.ct_geo_root_field = None
+        self.ct_geo_fields = []
+        self.ct_geo_container = None
+        self.ct_geo_btn_row = None
         self.ct_ma_checkbox = None
         self.ct_jsx_checkbox = None
         self.ct_fbx_checkbox = None
         self.ct_abc_checkbox = None
         self.ct_mov_checkbox = None
+        self.ct_mov_format_menu = None
         self.ct_raw_playblast_cb = None
         self.ct_raw_srgb_cb = None
         self.ct_wireframe_shader_cb = None
         self.ct_aa16_cb = None
         # Matchmove tab (mm_)
         self.mm_camera_field = None
-        self.mm_proxy_geo_field = None
+        self.mm_static_geo_fields = []
+        self.mm_static_geo_container = None
+        self.mm_static_geo_btn_row = None
         self.mm_rig_geo_pairs = []        # [{"rig_field", "geo_field", "row"}]
         self.mm_rig_geo_container = None  # columnLayout for dynamic pairs
         self.mm_btn_row = None            # +/- button row (rebuilt dynamically)
@@ -2727,6 +3360,7 @@ class MultiExportUI(object):
         self.mm_checker_color = None
         self.mm_checker_opacity = None
         self.mm_mov_checkbox = None
+        self.mm_mov_format_menu = None
         self.mm_raw_playblast_cb = None
         self.mm_raw_srgb_cb = None
         self.mm_aa16_cb = None
@@ -2738,7 +3372,7 @@ class MultiExportUI(object):
 
         self.window = cmds.window(
             WINDOW_NAME,
-            title="Export Genie  v{}".format(TOOL_VERSION),
+            title="Export Genie  {}".format(TOOL_VERSION),
             widthHeight=(440, 480),
             sizeable=True,
         )
@@ -2812,7 +3446,7 @@ class MultiExportUI(object):
 
         # --- Version ---
         cmds.text(
-            label="v{}".format(TOOL_VERSION),
+            label="{}".format(TOOL_VERSION),
             align="right",
             font="smallObliqueLabelFont",
         )
@@ -2901,18 +3535,16 @@ class MultiExportUI(object):
             buttonCommand=partial(self._load_selection, "ct", "camera"),
         )
 
-        self.ct_geo_root_field = cmds.textFieldButtonGrp(
-            label="Geo Group:",
-            buttonLabel="<< Load Sel",
-            columnWidth3=(70, 260, 80),
-            editable=False,
-            annotation="Select the top-level geo group to export",
+        # --- Dynamic geo group fields + buttons ---
+        self.ct_geo_fields = []
+        self.ct_geo_btn_row = None
+        self.ct_geo_container = cmds.columnLayout(
+            adjustableColumn=True, rowSpacing=4
         )
-        cmds.textFieldButtonGrp(
-            self.ct_geo_root_field,
-            edit=True,
-            buttonCommand=partial(self._load_selection, "ct", "geo"),
-        )
+        cmds.setParent("..")  # out of container
+
+        # Add first geo field and buttons
+        self._add_ct_geo_field()
 
         cmds.setParent("..")
         cmds.setParent("..")
@@ -2941,10 +3573,22 @@ class MultiExportUI(object):
             label="  Alembic (.abc)", value=True,
             annotation="Export Alembic cache",
         )
-        self.ct_mov_checkbox = cmds.checkBox(
-            label="  Playblast QC (.mov)", value=True,
-            annotation="Export QC playblast movie",
+        cmds.rowLayout(
+            numberOfColumns=2,
+            columnWidth2=(130, 140),
+            columnAttach=[(1, "left", 0), (2, "left", 0)],
         )
+        self.ct_mov_checkbox = cmds.checkBox(
+            label="  Playblast QC:", value=True,
+            annotation="Export QC playblast",
+        )
+        self.ct_mov_format_menu = cmds.optionMenu(
+            annotation="Choose playblast export format",
+        )
+        cmds.menuItem(label="H.264 (.mov)")
+        cmds.menuItem(label="PNG Sequence")
+        cmds.menuItem(label="H.264 (.mp4 Win)")
+        cmds.setParent("..")  # out of rowLayout
         cmds.setParent("..")
         cmds.setParent("..")
 
@@ -3017,18 +3661,16 @@ class MultiExportUI(object):
             buttonCommand=partial(self._load_selection, "mm", "camera"),
         )
 
-        self.mm_proxy_geo_field = cmds.textFieldButtonGrp(
-            label="Static Geo:",
-            buttonLabel="<< Load Sel",
-            columnWidth3=(70, 260, 80),
-            editable=False,
-            annotation="Select static/proxy geometry group",
+        # --- Dynamic static geo fields + buttons ---
+        self.mm_static_geo_fields = []
+        self.mm_static_geo_btn_row = None
+        self.mm_static_geo_container = cmds.columnLayout(
+            adjustableColumn=True, rowSpacing=4
         )
-        cmds.textFieldButtonGrp(
-            self.mm_proxy_geo_field,
-            edit=True,
-            buttonCommand=partial(self._load_selection, "mm", "proxy"),
-        )
+        cmds.setParent("..")  # out of container
+
+        # Add first static geo field and buttons
+        self._add_mm_static_geo_field()
 
         # --- Separator ---
         cmds.separator(style="in", height=12)
@@ -3067,10 +3709,22 @@ class MultiExportUI(object):
             label="  Alembic (.abc)", value=True,
             annotation="Export Alembic cache",
         )
-        self.mm_mov_checkbox = cmds.checkBox(
-            label="  Playblast QC (.mov)", value=True,
-            annotation="Export QC playblast movie",
+        cmds.rowLayout(
+            numberOfColumns=2,
+            columnWidth2=(130, 140),
+            columnAttach=[(1, "left", 0), (2, "left", 0)],
         )
+        self.mm_mov_checkbox = cmds.checkBox(
+            label="  Playblast QC:", value=True,
+            annotation="Export QC playblast",
+        )
+        self.mm_mov_format_menu = cmds.optionMenu(
+            annotation="Choose playblast export format",
+        )
+        cmds.menuItem(label="H.264 (.mov)")
+        cmds.menuItem(label="PNG Sequence")
+        cmds.menuItem(label="H.264 (.mp4 Win)")
+        cmds.setParent("..")  # out of rowLayout
         cmds.setParent("..")
         cmds.setParent("..")
 
@@ -3239,10 +3893,22 @@ class MultiExportUI(object):
             label="  FBX (.fbx)", value=True,
             annotation="Export FBX with baked blendshape animation",
         )
-        self.ft_mov_checkbox = cmds.checkBox(
-            label="  Playblast QC (.mov)", value=True,
-            annotation="Export QC playblast movie",
+        cmds.rowLayout(
+            numberOfColumns=2,
+            columnWidth2=(130, 140),
+            columnAttach=[(1, "left", 0), (2, "left", 0)],
         )
+        self.ft_mov_checkbox = cmds.checkBox(
+            label="  Playblast QC:", value=True,
+            annotation="Export QC playblast",
+        )
+        self.ft_mov_format_menu = cmds.optionMenu(
+            annotation="Choose playblast export format",
+        )
+        cmds.menuItem(label="H.264 (.mov)")
+        cmds.menuItem(label="PNG Sequence")
+        cmds.menuItem(label="H.264 (.mp4 Win)")
+        cmds.setParent("..")  # out of rowLayout
         cmds.setParent("..")
         cmds.setParent("..")
 
@@ -3329,7 +3995,7 @@ class MultiExportUI(object):
             columnAlign5=("right", "left", "center", "right", "left"),
         )
         cmds.text(label="Start: ")
-        self.start_frame_field = cmds.intField(value=1, width=65, annotation="First frame of the export range")
+        self.start_frame_field = cmds.intField(value=1001, width=65, annotation="First frame of the export range")
         cmds.text(label="")
         cmds.text(label="End: ")
         self.end_frame_field = cmds.intField(value=100, width=65, annotation="Last frame of the export range")
@@ -3387,7 +4053,8 @@ class MultiExportUI(object):
         if not sel:
             cmds.confirmDialog(
                 title="No Selection",
-                message="Nothing is selected. Please select an object first.",
+                message="Export Genie {}\n\nNothing is selected. Please select an object first.".format(
+                    TOOL_VERSION),
                 button=["OK"],
             )
             return
@@ -3405,7 +4072,8 @@ class MultiExportUI(object):
                 else:
                     cmds.confirmDialog(
                         title="Invalid Selection",
-                        message="'{}' is not a camera. Please select a camera.".format(obj),
+                        message="Export Genie {}\n\n'{}' is not a camera. Please select a camera.".format(
+                            TOOL_VERSION, obj),
                         button=["OK"],
                     )
                     return
@@ -3419,14 +4087,36 @@ class MultiExportUI(object):
                 }
                 cmds.confirmDialog(
                     title="Invalid Selection",
-                    message="'{}' is not a transform node. Please select the {}.".format(
-                        obj, role_labels.get(role, role)
+                    message="Export Genie {}\n\n'{}' is not a transform node. Please select the {}.".format(
+                        TOOL_VERSION, obj, role_labels.get(role, role)
                     ),
                     button=["OK"],
                 )
                 return
 
         cmds.textFieldButtonGrp(target_field, edit=True, text=obj)
+
+        # When a camera is loaded, auto-populate frame range from its animation
+        if role == "camera":
+            self._set_frame_range_from_camera(obj)
+
+    def _set_frame_range_from_camera(self, cam_xform):
+        """Set start frame to 1001 and end frame from the camera's last key."""
+        # Query all keyframes on the camera transform's TRS channels
+        keys = cmds.keyframe(cam_xform, query=True, timeChange=True) or []
+        # Also check the camera shape (focal length, etc.)
+        shapes = cmds.listRelatives(
+            cam_xform, shapes=True, type="camera") or []
+        for shp in shapes:
+            shp_keys = cmds.keyframe(
+                shp, query=True, timeChange=True) or []
+            keys.extend(shp_keys)
+        if keys:
+            last_frame = int(max(keys))
+            cmds.intField(
+                self.start_frame_field, edit=True, value=1001)
+            cmds.intField(
+                self.end_frame_field, edit=True, value=last_frame)
 
     def _load_selection(self, tab_prefix, role, *args):
         """Load the current viewport selection into the appropriate field.
@@ -3438,7 +4128,6 @@ class MultiExportUI(object):
         if tab_prefix == "ct":
             field_map = {
                 "camera": self.ct_camera_field,
-                "geo": self.ct_geo_root_field,
             }
         elif tab_prefix == "ft":
             field_map = {
@@ -3448,7 +4137,6 @@ class MultiExportUI(object):
         else:
             field_map = {
                 "camera": self.mm_camera_field,
-                "proxy": self.mm_proxy_geo_field,
             }
 
         target_field = field_map.get(role)
@@ -3456,6 +4144,88 @@ class MultiExportUI(object):
             return
 
         self._load_selection_into(target_field, role)
+
+    # --- Camera Track dynamic geo group fields ---
+
+    def _rebuild_ct_geo_buttons(self):
+        """Recreate the +/- button row at the bottom of the CT geo container."""
+        if self.ct_geo_btn_row:
+            cmds.deleteUI(self.ct_geo_btn_row)
+            self.ct_geo_btn_row = None
+
+        cmds.setParent(self.ct_geo_container)
+        self.ct_geo_btn_row = cmds.rowLayout(
+            numberOfColumns=3,
+            columnWidth3=(70, 30, 30),
+            columnAlign3=("right", "center", "center"),
+        )
+        cmds.text(label="")
+        cmds.button(
+            label="+", width=26,
+            command=partial(self._add_ct_geo_field),
+            annotation="Add another geo group",
+        )
+        cmds.button(
+            label="-", width=26,
+            visible=(len(self.ct_geo_fields) >= 2),
+            command=partial(self._remove_ct_geo_field),
+            annotation="Remove the last geo group",
+        )
+        cmds.setParent("..")  # out of rowLayout
+        cmds.setParent("..")  # out of container
+
+    def _add_ct_geo_field(self, *args):
+        """Add a new Geo Group picker field to the camera track tab."""
+        if self.ct_geo_btn_row:
+            cmds.deleteUI(self.ct_geo_btn_row)
+            self.ct_geo_btn_row = None
+
+        idx = len(self.ct_geo_fields) + 1
+        suffix = "" if idx == 1 else " {}".format(idx)
+
+        cmds.setParent(self.ct_geo_container)
+        row = cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
+
+        field = cmds.textFieldButtonGrp(
+            label="Geo Group{}:".format(suffix),
+            buttonLabel="<< Load Sel",
+            columnWidth3=(70, 260, 80),
+            editable=False,
+            annotation="Select a top-level geo group to export",
+        )
+        cmds.textFieldButtonGrp(
+            field, edit=True,
+            buttonCommand=partial(self._load_selection_into, field, "geo"),
+        )
+
+        cmds.setParent("..")  # out of row columnLayout
+        cmds.setParent("..")  # out of container
+
+        self.ct_geo_fields.append({
+            "field": field,
+            "row": row,
+        })
+
+        self._rebuild_ct_geo_buttons()
+
+        if len(self.ct_geo_fields) > 1:
+            cur_h = cmds.window(self.window, query=True, height=True)
+            cmds.window(self.window, edit=True, height=cur_h + 30)
+
+    def _remove_ct_geo_field(self, *args):
+        """Remove the last Geo Group picker field from camera track tab."""
+        if len(self.ct_geo_fields) <= 1:
+            return
+
+        entry = self.ct_geo_fields.pop()
+        cmds.deleteUI(entry["row"])
+
+        self._rebuild_ct_geo_buttons()
+
+        cur_h = cmds.window(self.window, query=True, height=True)
+        cmds.window(self.window, edit=True, height=cur_h - 30)
+
+    # --- Matchmove dynamic rig/geo pairs ---
 
     def _rebuild_rig_geo_buttons(self):
         """Recreate the +/- button row at the bottom of the rig/geo container."""
@@ -3485,7 +4255,7 @@ class MultiExportUI(object):
         cmds.setParent("..")  # out of container
 
     def _add_rig_geo_pair(self, *args):
-        """Add a new Ctrl Rig Group / Anim Geo Group pair to the matchmove tab."""
+        """Add a new Main Rig Group / Mesh Group pair to the matchmove tab."""
         # Remove button row so the new pair is inserted before it
         if self.mm_btn_row:
             cmds.deleteUI(self.mm_btn_row)
@@ -3498,7 +4268,7 @@ class MultiExportUI(object):
         row = cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
 
         rig_field = cmds.textFieldButtonGrp(
-            label="Ctrl Rig Group{}:".format(suffix),
+            label="Main Rig Group{}:".format(suffix),
             buttonLabel="<< Load Sel",
             columnWidth3=(90, 240, 80),
             editable=False,
@@ -3510,7 +4280,7 @@ class MultiExportUI(object):
         )
 
         geo_field = cmds.textFieldButtonGrp(
-            label="Anim Geo Group{}:".format(suffix),
+            label="Mesh Group{}:".format(suffix),
             buttonLabel="<< Load Sel",
             columnWidth3=(90, 240, 80),
             editable=False,
@@ -3539,7 +4309,7 @@ class MultiExportUI(object):
             cmds.window(self.window, edit=True, height=cur_h + 52)
 
     def _remove_rig_geo_pair(self, *args):
-        """Remove the last Ctrl Rig Group / Anim Geo Group pair."""
+        """Remove the last Main Rig Group / Mesh Group pair."""
         if len(self.mm_rig_geo_pairs) <= 1:
             return
 
@@ -3552,6 +4322,86 @@ class MultiExportUI(object):
         # Shrink window
         cur_h = cmds.window(self.window, query=True, height=True)
         cmds.window(self.window, edit=True, height=cur_h - 52)
+
+    # --- Matchmove dynamic static geo fields ---
+
+    def _rebuild_mm_static_geo_buttons(self):
+        """Recreate the +/- button row at the bottom of the MM static geo container."""
+        if self.mm_static_geo_btn_row:
+            cmds.deleteUI(self.mm_static_geo_btn_row)
+            self.mm_static_geo_btn_row = None
+
+        cmds.setParent(self.mm_static_geo_container)
+        self.mm_static_geo_btn_row = cmds.rowLayout(
+            numberOfColumns=3,
+            columnWidth3=(70, 30, 30),
+            columnAlign3=("right", "center", "center"),
+        )
+        cmds.text(label="")
+        cmds.button(
+            label="+", width=26,
+            command=partial(self._add_mm_static_geo_field),
+            annotation="Add another static geo group",
+        )
+        cmds.button(
+            label="-", width=26,
+            visible=(len(self.mm_static_geo_fields) >= 2),
+            command=partial(self._remove_mm_static_geo_field),
+            annotation="Remove the last static geo group",
+        )
+        cmds.setParent("..")  # out of rowLayout
+        cmds.setParent("..")  # out of container
+
+    def _add_mm_static_geo_field(self, *args):
+        """Add a new Static Geo picker field to the matchmove tab."""
+        if self.mm_static_geo_btn_row:
+            cmds.deleteUI(self.mm_static_geo_btn_row)
+            self.mm_static_geo_btn_row = None
+
+        idx = len(self.mm_static_geo_fields) + 1
+        suffix = "" if idx == 1 else " {}".format(idx)
+
+        cmds.setParent(self.mm_static_geo_container)
+        row = cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
+
+        field = cmds.textFieldButtonGrp(
+            label="Static Geo{}:".format(suffix),
+            buttonLabel="<< Load Sel",
+            columnWidth3=(70, 260, 80),
+            editable=False,
+            annotation="Select static/proxy geometry group",
+        )
+        cmds.textFieldButtonGrp(
+            field, edit=True,
+            buttonCommand=partial(self._load_selection_into, field, "proxy"),
+        )
+
+        cmds.setParent("..")  # out of row columnLayout
+        cmds.setParent("..")  # out of container
+
+        self.mm_static_geo_fields.append({
+            "field": field,
+            "row": row,
+        })
+
+        self._rebuild_mm_static_geo_buttons()
+
+        if len(self.mm_static_geo_fields) > 1:
+            cur_h = cmds.window(self.window, query=True, height=True)
+            cmds.window(self.window, edit=True, height=cur_h + 30)
+
+    def _remove_mm_static_geo_field(self, *args):
+        """Remove the last Static Geo picker field from matchmove tab."""
+        if len(self.mm_static_geo_fields) <= 1:
+            return
+
+        entry = self.mm_static_geo_fields.pop()
+        cmds.deleteUI(entry["row"])
+
+        self._rebuild_mm_static_geo_buttons()
+
+        cur_h = cmds.window(self.window, query=True, height=True)
+        cmds.window(self.window, edit=True, height=cur_h - 30)
 
     # --- Face Track dynamic face mesh entries ---
 
@@ -3636,7 +4486,8 @@ class MultiExportUI(object):
     def _set_timeline_range(self, *args):
         start = cmds.playbackOptions(query=True, animationStartTime=True)
         end = cmds.playbackOptions(query=True, animationEndTime=True)
-        cmds.intField(self.start_frame_field, edit=True, value=int(start))
+        cmds.intField(self.start_frame_field, edit=True,
+                       value=max(int(start), 1001))
         cmds.intField(self.end_frame_field, edit=True, value=int(end))
 
     def _on_tpose_toggled(self, checked, *args):
@@ -3820,45 +4671,57 @@ class MultiExportUI(object):
         camera = cmds.textFieldButtonGrp(
             self.ct_camera_field, query=True, text=True
         ).strip()
-        geo_root = cmds.textFieldButtonGrp(
-            self.ct_geo_root_field, query=True, text=True
-        ).strip()
 
-        if do_ma and not camera and not geo_root:
+        # Gather all geo group fields
+        geo_roots = []
+        for i, entry in enumerate(self.ct_geo_fields):
+            g = cmds.textFieldButtonGrp(
+                entry["field"], query=True, text=True
+            ).strip()
+            if g:
+                geo_roots.append(g)
+            suffix = "" if i == 0 else " {}".format(i + 1)
+            if g and not cmds.objExists(g):
+                errors.append(
+                    "Geo Group{} '{}' no longer exists in the scene.".format(
+                        suffix, g))
+
+        has_geo = bool(geo_roots)
+        if do_ma and not camera and not has_geo:
             errors.append(
                 "MA export enabled but no Camera or Geo Node assigned."
             )
-        if do_jsx and not camera and not geo_root:
+        if do_jsx and not camera and not has_geo:
             errors.append(
                 "JSX export enabled but no Camera or Geo Node assigned."
             )
-        if do_fbx and not (camera or geo_root):
+        if do_fbx and not (camera or has_geo):
             errors.append(
                 "FBX export enabled but no Camera or Geo Node assigned."
             )
-        if do_abc and not (camera or geo_root):
+        if do_abc and not (camera or has_geo):
             errors.append(
                 "Alembic export enabled but no Camera or Geo Node assigned."
             )
 
-        for role_name, value in [("Camera", camera), ("Geo Group", geo_root)]:
-            if value and not cmds.objExists(value):
-                errors.append(
-                    "{} '{}' no longer exists in the scene.".format(
-                        role_name, value
-                    )
-                )
+        if camera and not cmds.objExists(camera):
+            errors.append(
+                "Camera '{}' no longer exists in the scene.".format(camera)
+            )
 
         # Name-collision checks
         assigned = []
         if camera:
             assigned.append(("Camera", camera))
-        if geo_root:
-            assigned.append(("Geo Group", geo_root))
+        for i, g in enumerate(geo_roots):
+            suffix = "" if i == 0 else " {}".format(i + 1)
+            assigned.append(("Geo Group{}".format(suffix), g))
         self._check_name_collisions(errors, assigned)
 
-        if do_jsx and geo_root and cmds.objExists(geo_root):
-            self._check_obj_name_collisions(errors, geo_root, camera)
+        if do_jsx:
+            for g in geo_roots:
+                if g and cmds.objExists(g):
+                    self._check_obj_name_collisions(errors, g, camera)
 
         return errors, warnings
 
@@ -3877,9 +4740,20 @@ class MultiExportUI(object):
         camera = cmds.textFieldButtonGrp(
             self.mm_camera_field, query=True, text=True
         ).strip()
-        proxy_geo = cmds.textFieldButtonGrp(
-            self.mm_proxy_geo_field, query=True, text=True
-        ).strip()
+
+        # Gather all static geo fields
+        proxy_geos = []
+        for i, entry in enumerate(self.mm_static_geo_fields):
+            pg = cmds.textFieldButtonGrp(
+                entry["field"], query=True, text=True
+            ).strip()
+            if pg:
+                proxy_geos.append(pg)
+            suffix = "" if i == 0 else " {}".format(i + 1)
+            if pg and not cmds.objExists(pg):
+                errors.append(
+                    "Static Geo{} '{}' no longer exists in the scene.".format(
+                        suffix, pg))
 
         # Gather rig/geo pairs
         rig_roots = []
@@ -3899,11 +4773,11 @@ class MultiExportUI(object):
             suffix = "" if i == 0 else " {}".format(i + 1)
             if r and not cmds.objExists(r):
                 errors.append(
-                    "Ctrl Rig Group{} '{}' no longer exists in the scene.".format(
+                    "Main Rig Group{} '{}' no longer exists in the scene.".format(
                         suffix, r))
             if g and not cmds.objExists(g):
                 errors.append(
-                    "Anim Geo Group{} '{}' no longer exists in the scene.".format(
+                    "Mesh Group{} '{}' no longer exists in the scene.".format(
                         suffix, g))
 
         if do_ma and not any(geo_roots + rig_roots + [camera]):
@@ -3912,28 +4786,23 @@ class MultiExportUI(object):
             )
         if do_fbx and not (geo_roots or rig_roots):
             errors.append(
-                "FBX export enabled but no Anim Geo Group or Ctrl Rig Group assigned."
+                "FBX export enabled but no Mesh Group or Main Rig Group assigned."
             )
         if do_abc and not geo_roots:
-            errors.append("Alembic export enabled but no Anim Geo Group assigned.")
+            errors.append("Alembic export enabled but no Mesh Group assigned.")
 
-        for role_name, value in [
-            ("Camera", camera),
-            ("Static Geo", proxy_geo),
-        ]:
-            if value and not cmds.objExists(value):
-                errors.append(
-                    "{} '{}' no longer exists in the scene.".format(
-                        role_name, value
-                    )
-                )
+        if camera and not cmds.objExists(camera):
+            errors.append(
+                "Camera '{}' no longer exists in the scene.".format(camera)
+            )
 
         # Name-collision checks
         assigned = []
         if camera:
             assigned.append(("Camera", camera))
-        if proxy_geo:
-            assigned.append(("Static Geo", proxy_geo))
+        for i, pg in enumerate(proxy_geos):
+            suffix = "" if i == 0 else " {}".format(i + 1)
+            assigned.append(("Static Geo{}".format(suffix), pg))
         for i, pair in enumerate(self.mm_rig_geo_pairs):
             r = cmds.textFieldButtonGrp(
                 pair["rig_field"], query=True, text=True
@@ -3943,9 +4812,9 @@ class MultiExportUI(object):
             ).strip()
             suffix = "" if i == 0 else " {}".format(i + 1)
             if r:
-                assigned.append(("Ctrl Rig Group{}".format(suffix), r))
+                assigned.append(("Main Rig Group{}".format(suffix), r))
             if g:
-                assigned.append(("Anim Geo Group{}".format(suffix), g))
+                assigned.append(("Mesh Group{}".format(suffix), g))
         self._check_name_collisions(errors, assigned)
 
         return errors, warnings
@@ -4114,7 +4983,8 @@ class MultiExportUI(object):
                 self._log(e)
             cmds.confirmDialog(
                 title="Export Errors",
-                message="\n\n".join(errors),
+                message="Export Genie {}\n\n{}".format(
+                    TOOL_VERSION, "\n\n".join(errors)),
                 button=["OK"],
             )
             return
@@ -4122,7 +4992,8 @@ class MultiExportUI(object):
         if warnings:
             result = cmds.confirmDialog(
                 title="Warnings",
-                message="\n\n".join(warnings),
+                message="Export Genie {}\n\n{}".format(
+                    TOOL_VERSION, "\n\n".join(warnings)),
                 button=["Continue", "Cancel"],
                 defaultButton="Continue",
                 cancelButton="Cancel",
@@ -4141,9 +5012,13 @@ class MultiExportUI(object):
         camera = cmds.textFieldButtonGrp(
             self.ct_camera_field, query=True, text=True
         ).strip()
-        geo_root = cmds.textFieldButtonGrp(
-            self.ct_geo_root_field, query=True, text=True
-        ).strip()
+        geo_roots = []
+        for entry in self.ct_geo_fields:
+            g = cmds.textFieldButtonGrp(
+                entry["field"], query=True, text=True
+            ).strip()
+            if g:
+                geo_roots.append(g)
         do_ma = cmds.checkBox(self.ct_ma_checkbox, query=True, value=True)
         do_jsx = cmds.checkBox(self.ct_jsx_checkbox, query=True, value=True)
         do_fbx = cmds.checkBox(self.ct_fbx_checkbox, query=True, value=True)
@@ -4211,26 +5086,26 @@ class MultiExportUI(object):
             # JSX + OBJ export
             if do_jsx:
                 geo_children = []
-                if geo_root:
+                for gr in geo_roots:
                     children = cmds.listRelatives(
-                        geo_root, children=True, type="transform"
+                        gr, children=True, type="transform"
                     ) or []
                     if children:
-                        geo_children = children
+                        geo_children.extend(children)
                     else:
-                        geo_children = [geo_root]
-                    # Exclude camera, chisels, and nulls from OBJ paths
-                    # (nulls/locators are handled separately inside export_jsx)
-                    if camera:
-                        geo_children = [
-                            c for c in geo_children
-                            if not Exporter._is_descendant_of(camera, c)
-                        ]
+                        geo_children.append(gr)
+                # Exclude camera, chisels, and nulls from OBJ paths
+                # (nulls/locators are handled separately inside export_jsx)
+                if camera:
                     geo_children = [
                         c for c in geo_children
-                        if "chisels" not in c.lower()
-                        and "nulls" not in c.lower()
+                        if not Exporter._is_descendant_of(camera, c)
                     ]
+                geo_children = [
+                    c for c in geo_children
+                    if "chisels" not in c.lower()
+                    and "nulls" not in c.lower()
+                ]
 
                 ae_paths = FolderManager.build_ae_export_paths(
                     export_root, scene_base, version_str, geo_children
@@ -4239,8 +5114,10 @@ class MultiExportUI(object):
                 all_paths["jsx"] = ae_paths["jsx"]
                 self._advance_progress()  # step 1: setup complete
 
+                # JSX export uses the first geo root as the primary group
+                jsx_geo_root = geo_roots[0] if geo_roots else None
                 results["jsx"] = exporter.export_jsx(
-                    ae_paths["jsx"], ae_paths["obj"], camera, geo_root,
+                    ae_paths["jsx"], ae_paths["obj"], camera, jsx_geo_root,
                     start_frame, end_frame
                 )
                 self._log_result("JSX + OBJ", results["jsx"])
@@ -4248,13 +5125,12 @@ class MultiExportUI(object):
 
             if do_ma:
                 paths = FolderManager.build_export_paths(
-                    export_root, scene_base, version_str
+                    export_root, scene_base, version_str, tag="cam"
                 )
                 FolderManager.ensure_directories({"ma": paths["ma"]})
                 all_paths["ma"] = paths["ma"]
-                geo_roots_list = [geo_root] if geo_root else []
                 results["ma"] = exporter.export_ma(
-                    paths["ma"], camera, geo_roots_list, [], None,
+                    paths["ma"], camera, geo_roots, [], [],
                     start_frame=start_frame, end_frame=end_frame,
                 )
                 self._log_result("MA", results["ma"])
@@ -4262,13 +5138,12 @@ class MultiExportUI(object):
 
             if do_fbx:
                 paths = FolderManager.build_export_paths(
-                    export_root, scene_base, version_str
+                    export_root, scene_base, version_str, tag="cam"
                 )
                 FolderManager.ensure_directories({"fbx": paths["fbx"]})
                 all_paths["fbx"] = paths["fbx"]
-                geo_roots_list = [geo_root] if geo_root else []
                 results["fbx"] = exporter.export_fbx(
-                    paths["fbx"], camera, geo_roots_list, [], None,
+                    paths["fbx"], camera, geo_roots, [], [],
                     start_frame, end_frame
                 )
                 self._log_result("FBX", results["fbx"])
@@ -4276,13 +5151,12 @@ class MultiExportUI(object):
 
             if do_abc:
                 paths = FolderManager.build_export_paths(
-                    export_root, scene_base, version_str
+                    export_root, scene_base, version_str, tag="cam"
                 )
                 FolderManager.ensure_directories({"abc": paths["abc"]})
                 all_paths["abc"] = paths["abc"]
-                geo_roots_list = [geo_root] if geo_root else []
                 results["abc"] = exporter.export_abc(
-                    paths["abc"], camera, geo_roots_list, None,
+                    paths["abc"], camera, geo_roots, [],
                     start_frame, end_frame
                 )
                 self._log_result("ABC", results["abc"])
@@ -4290,10 +5164,27 @@ class MultiExportUI(object):
 
             if do_mov:
                 paths = FolderManager.build_export_paths(
-                    export_root, scene_base, version_str
+                    export_root, scene_base, version_str, tag="cam"
                 )
-                FolderManager.ensure_directories({"mov": paths["mov"]})
-                all_paths["mov"] = paths["mov"]
+                fmt_choice = cmds.optionMenu(
+                    self.ct_mov_format_menu, query=True, value=True)
+                png_mode = "PNG" in fmt_choice
+                mp4_mode = ".mp4" in fmt_choice
+                if mp4_mode:
+                    pb_path = paths["mp4_tmp_file"]
+                    if not os.path.exists(paths["mp4_tmp_dir"]):
+                        os.makedirs(paths["mp4_tmp_dir"])
+                    all_paths["mov"] = paths["mp4"]
+                elif png_mode:
+                    pb_path = paths["png_file"]
+                    if not os.path.exists(paths["png_dir"]):
+                        os.makedirs(paths["png_dir"])
+                    all_paths["mov"] = paths["png_dir"]
+                else:
+                    pb_path = paths["mov"]
+                    FolderManager.ensure_directories(
+                        {"mov": paths["mov"]})
+                    all_paths["mov"] = paths["mov"]
                 raw_pb = cmds.checkBox(
                     self.ct_raw_playblast_cb, query=True, value=True)
                 raw_srgb = cmds.checkBox(
@@ -4303,13 +5194,16 @@ class MultiExportUI(object):
                 aa16 = cmds.checkBox(
                     self.ct_aa16_cb, query=True, value=True)
                 results["mov"] = exporter.export_playblast(
-                    paths["mov"], camera, start_frame, end_frame,
+                    pb_path, camera, start_frame, end_frame,
                     camera_track_mode=True,
                     raw_playblast=raw_pb,
                     render_raw_srgb=raw_srgb,
                     wireframe_shader=wf_shader,
-                    wireframe_shader_geo=geo_root,
+                    wireframe_shader_geo=geo_roots,
                     msaa_16=aa16,
+                    png_mode=png_mode,
+                    mp4_mode=mp4_mode,
+                    mp4_output=paths.get("mp4"),
                 )
                 self._log_result("QC Playblast", results["mov"])
                 self._advance_progress()
@@ -4328,7 +5222,8 @@ class MultiExportUI(object):
                 self._log(e)
             cmds.confirmDialog(
                 title="Export Errors",
-                message="\n\n".join(errors),
+                message="Export Genie {}\n\n{}".format(
+                    TOOL_VERSION, "\n\n".join(errors)),
                 button=["OK"],
             )
             return
@@ -4336,7 +5231,8 @@ class MultiExportUI(object):
         if warnings:
             result = cmds.confirmDialog(
                 title="Warnings",
-                message="\n\n".join(warnings),
+                message="Export Genie {}\n\n{}".format(
+                    TOOL_VERSION, "\n\n".join(warnings)),
                 button=["Continue", "Cancel"],
                 defaultButton="Continue",
                 cancelButton="Cancel",
@@ -4355,9 +5251,13 @@ class MultiExportUI(object):
         camera = cmds.textFieldButtonGrp(
             self.mm_camera_field, query=True, text=True
         ).strip()
-        proxy_geo = cmds.textFieldButtonGrp(
-            self.mm_proxy_geo_field, query=True, text=True
-        ).strip()
+        proxy_geos = []
+        for entry in self.mm_static_geo_fields:
+            pg = cmds.textFieldButtonGrp(
+                entry["field"], query=True, text=True
+            ).strip()
+            if pg:
+                proxy_geos.append(pg)
         rig_roots = []
         geo_roots = []
         for pair in self.mm_rig_geo_pairs:
@@ -4407,11 +5307,15 @@ class MultiExportUI(object):
             export_root, scene_base, version_str
         )
 
-        # Build paths and create directories
+        # Build paths and create directories (exclude PNG and MP4 temp
+        # dirs — those are created on demand only when that format is selected)
         paths = FolderManager.build_export_paths(
             export_root, scene_base, version_str, tag="charMM"
         )
-        FolderManager.ensure_directories(paths)
+        FolderManager.ensure_directories(
+            {k: v for k, v in paths.items()
+             if k not in ("png_dir", "png_file",
+                          "mp4_tmp_dir", "mp4_tmp_file")})
 
         dir_path = os.path.dirname(paths.get("ma", paths.get("fbx", "")))
         self._log("Export to: {}".format(dir_path))
@@ -4428,7 +5332,10 @@ class MultiExportUI(object):
         original_cam_name = camera
         try:
             if camera:
-                if cmds.objExists(camera):
+                if camera == "cam_main" and cmds.objExists(camera):
+                    # Already named correctly — no rename needed
+                    pass
+                elif cmds.objExists(camera):
                     renamed_cam = cmds.rename(camera, "cam_main")
                     camera = renamed_cam
                 elif cmds.objExists("cam_main"):
@@ -4441,29 +5348,86 @@ class MultiExportUI(object):
 
             if do_ma:
                 results["ma"] = exporter.export_ma(
-                    paths["ma"], camera, geo_roots, rig_roots, proxy_geo,
+                    paths["ma"], camera, geo_roots, rig_roots, proxy_geos,
                     start_frame=start_frame, end_frame=end_frame,
                 )
                 self._log_result("MA", results["ma"])
                 self._advance_progress()
 
             if do_fbx:
-                results["fbx"] = exporter.export_fbx(
-                    paths["fbx"], camera, geo_roots, rig_roots, proxy_geo,
-                    tpose_start, end_frame
-                )
-                self._log_result("FBX", results["fbx"])
+                self._log("[Matchmove] Preparing scene for UE5 FBX...")
+                cmds.undoInfo(openChunk=True)
+                try:
+                    exporter.prep_for_ue5_fbx_export(
+                        geo_roots, rig_roots, tpose_start, end_frame,
+                        camera=camera)
+                    # Namespace stripping in prep may have renamed nodes.
+                    # Resolve to long (unique) names so select succeeds.
+                    def _resolve_name(name):
+                        """Return a unique DAG path after namespace strip."""
+                        if not name:
+                            return name
+                        long_names = cmds.ls(name, long=True)
+                        if long_names:
+                            return long_names[0]
+                        # Name gone — try without namespace prefix
+                        short = name.rsplit(":", 1)[-1]
+                        long_names = cmds.ls(short, long=True)
+                        if len(long_names) == 1:
+                            return long_names[0]
+                        # Multiple matches — find by matching tail of
+                        # the original long path structure
+                        if long_names:
+                            return long_names[0]
+                        return name
+                    fbx_geo = [_resolve_name(g) for g in geo_roots]
+                    fbx_rigs = [_resolve_name(r) for r in rig_roots]
+                    fbx_proxies = [_resolve_name(p) for p in proxy_geos]
+                    fbx_cam = _resolve_name(camera) if camera else camera
+                    results["fbx"] = exporter.export_fbx(
+                        paths["fbx"], fbx_cam, fbx_geo, fbx_rigs,
+                        fbx_proxies, tpose_start, end_frame
+                    )
+                except Exception as exc:
+                    self._log(
+                        "[Matchmove] FBX prep/export failed: "
+                        "{}".format(exc))
+                    results["fbx"] = False
+                finally:
+                    cmds.undoInfo(closeChunk=True)
+                    try:
+                        cmds.undo()
+                        self._log("[Matchmove] Scene restored via undo.")
+                    except Exception:
+                        self._log(
+                            "[Matchmove] WARNING: Undo failed — scene "
+                            "may contain prep artifacts.")
+                self._log_result("FBX", results.get("fbx", False))
                 self._advance_progress()
 
             if do_abc:
                 results["abc"] = exporter.export_abc(
-                    paths["abc"], camera, geo_roots, proxy_geo,
+                    paths["abc"], camera, geo_roots, proxy_geos,
                     tpose_start, end_frame
                 )
                 self._log_result("ABC", results["abc"])
                 self._advance_progress()
 
             if do_mov:
+                fmt_choice = cmds.optionMenu(
+                    self.mm_mov_format_menu, query=True, value=True)
+                png_mode = "PNG" in fmt_choice
+                mp4_mode = ".mp4" in fmt_choice
+                if mp4_mode:
+                    pb_path = paths["mp4_tmp_file"]
+                    if not os.path.exists(paths["mp4_tmp_dir"]):
+                        os.makedirs(paths["mp4_tmp_dir"])
+                elif png_mode:
+                    pb_path = paths["png_file"]
+                    if not os.path.exists(paths["png_dir"]):
+                        os.makedirs(paths["png_dir"])
+                else:
+                    pb_path = paths["mov"]
                 raw_pb = cmds.checkBox(
                     self.mm_raw_playblast_cb, query=True, value=True)
                 raw_srgb = cmds.checkBox(
@@ -4477,7 +5441,7 @@ class MultiExportUI(object):
                 aa16 = cmds.checkBox(
                     self.mm_aa16_cb, query=True, value=True)
                 results["mov"] = exporter.export_playblast(
-                    paths["mov"], camera, start_frame, end_frame,
+                    pb_path, camera, start_frame, end_frame,
                     matchmove_geo=geo_roots,
                     checker_scale=chk_scale,
                     checker_color=chk_color,
@@ -4485,6 +5449,9 @@ class MultiExportUI(object):
                     raw_playblast=raw_pb,
                     render_raw_srgb=raw_srgb,
                     msaa_16=aa16,
+                    png_mode=png_mode,
+                    mp4_mode=mp4_mode,
+                    mp4_output=paths.get("mp4"),
                 )
                 self._log_result("QC Playblast", results["mov"])
                 self._advance_progress()
@@ -4503,7 +5470,8 @@ class MultiExportUI(object):
                 self._log(e)
             cmds.confirmDialog(
                 title="Export Errors",
-                message="\n\n".join(errors),
+                message="Export Genie {}\n\n{}".format(
+                    TOOL_VERSION, "\n\n".join(errors)),
                 button=["OK"],
             )
             return
@@ -4511,7 +5479,8 @@ class MultiExportUI(object):
         if warnings:
             result = cmds.confirmDialog(
                 title="Warnings",
-                message="\n\n".join(warnings),
+                message="Export Genie {}\n\n{}".format(
+                    TOOL_VERSION, "\n\n".join(warnings)),
                 button=["Continue", "Cancel"],
                 defaultButton="Continue",
                 cancelButton="Cancel",
@@ -4565,11 +5534,15 @@ class MultiExportUI(object):
             export_root, scene_base, version_str
         )
 
-        # Build paths and create directories
+        # Build paths and create directories (exclude PNG and MP4 temp
+        # dirs — those are created on demand only when that format is selected)
         paths = FolderManager.build_export_paths(
             export_root, scene_base, version_str, tag="KTHead"
         )
-        FolderManager.ensure_directories(paths)
+        FolderManager.ensure_directories(
+            {k: v for k, v in paths.items()
+             if k not in ("png_dir", "png_file",
+                          "mp4_tmp_dir", "mp4_tmp_file")})
 
         dir_path = os.path.dirname(paths.get("ma", paths.get("fbx", "")))
         self._log("Export to: {}".format(dir_path))
@@ -4586,7 +5559,10 @@ class MultiExportUI(object):
         original_cam_name = camera
         try:
             if camera:
-                if cmds.objExists(camera):
+                if camera == "cam_main" and cmds.objExists(camera):
+                    # Already named correctly — no rename needed
+                    pass
+                elif cmds.objExists(camera):
                     renamed_cam = cmds.rename(camera, "cam_main")
                     camera = renamed_cam
                 elif cmds.objExists("cam_main"):
@@ -4599,8 +5575,9 @@ class MultiExportUI(object):
 
             if do_ma:
                 # MA export: no conversion, Alembic animation stays intact
+                static_geos = [static_geo] if static_geo else []
                 results["ma"] = exporter.export_ma(
-                    paths["ma"], camera, face_meshes, [], static_geo,
+                    paths["ma"], camera, face_meshes, [], static_geos,
                     start_frame=start_frame, end_frame=end_frame,
                 )
                 self._log_result("MA", results["ma"])
@@ -4630,11 +5607,11 @@ class MultiExportUI(object):
                                 len(prep["select_for_export"])))
                         for obj in prep["select_for_export"]:
                             self._log("[FaceTrack]   - {}".format(obj))
+                        static_geos = [static_geo] if static_geo else []
                         results["fbx"] = exporter.export_fbx(
                             paths["fbx"], camera,
                             prep["select_for_export"], [],
-                            static_geo, start_frame, end_frame,
-                            resample_animation=True,
+                            static_geos, start_frame, end_frame,
                             export_input_connections=True,
                         )
                 except Exception as exc:
@@ -4671,6 +5648,20 @@ class MultiExportUI(object):
                 self._advance_progress()
 
             if do_mov:
+                fmt_choice = cmds.optionMenu(
+                    self.ft_mov_format_menu, query=True, value=True)
+                png_mode = "PNG" in fmt_choice
+                mp4_mode = ".mp4" in fmt_choice
+                if mp4_mode:
+                    pb_path = paths["mp4_tmp_file"]
+                    if not os.path.exists(paths["mp4_tmp_dir"]):
+                        os.makedirs(paths["mp4_tmp_dir"])
+                elif png_mode:
+                    pb_path = paths["png_file"]
+                    if not os.path.exists(paths["png_dir"]):
+                        os.makedirs(paths["png_dir"])
+                else:
+                    pb_path = paths["mov"]
                 raw_pb = cmds.checkBox(
                     self.ft_raw_playblast_cb, query=True, value=True)
                 raw_srgb = cmds.checkBox(
@@ -4684,7 +5675,7 @@ class MultiExportUI(object):
                 aa16 = cmds.checkBox(
                     self.ft_aa16_cb, query=True, value=True)
                 results["mov"] = exporter.export_playblast(
-                    paths["mov"], camera, start_frame, end_frame,
+                    pb_path, camera, start_frame, end_frame,
                     matchmove_geo=face_meshes,
                     checker_scale=chk_scale,
                     checker_color=chk_color,
@@ -4692,6 +5683,9 @@ class MultiExportUI(object):
                     raw_playblast=raw_pb,
                     render_raw_srgb=raw_srgb,
                     msaa_16=aa16,
+                    png_mode=png_mode,
+                    mp4_mode=mp4_mode,
+                    mp4_output=paths.get("mp4"),
                 )
                 self._log_result("QC Playblast", results["mov"])
                 self._advance_progress()
@@ -4716,7 +5710,8 @@ class MultiExportUI(object):
             self._log("Export finished with errors.")
             cmds.confirmDialog(
                 title="Export Complete (with errors)",
-                message="Some exports failed: {}\nSee Script Editor for details.".format(
+                message="Export Genie {}\n\nSome exports failed: {}\nSee Script Editor for details.".format(
+                    TOOL_VERSION,
                     ", ".join(f.upper() for f in failed)
                 ),
                 button=["OK"],
@@ -4822,6 +5817,13 @@ def install():
             os.makedirs(scripts_dir)
         shutil.copy2(source_file, dest_file)
 
+    # Copy bundled bin/ directory (contains ffmpeg.exe for Windows)
+    source_dir = os.path.dirname(source_file)
+    source_bin = os.path.join(source_dir, "bin")
+    dest_bin = os.path.join(scripts_dir, "bin")
+    if os.path.isdir(source_bin):
+        shutil.copytree(source_bin, dest_bin, dirs_exist_ok=True)
+
     # Clear compiled .pyc cache to ensure a fresh import
     pycache_dir = os.path.join(scripts_dir, "__pycache__")
     if os.path.isdir(pycache_dir):
@@ -4842,7 +5844,7 @@ def install():
     cmds.confirmDialog(
         title="Install Complete",
         message=(
-            "Export Genie v{} installed!\n\n"
+            "Export Genie {} installed!\n\n"
             "A shelf button has been added to your current shelf.\n"
             "Click it to open the export tool."
         ).format(mod.TOOL_VERSION),
